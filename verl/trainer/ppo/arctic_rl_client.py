@@ -120,7 +120,8 @@ class ArcticRLClient4VeRL:
         self.inference_engine.destroy()
         return
 
-
+# TODO: Once we are happy with this implementation, we can make this the new
+# ArcticRLClient4VeRL.
 class ArcticRLClientWrapper:
     """Thin wrapper around ArcticTraining's ArcticRLClient that exposes the
     same interface as ArcticRLClient4VeRL so it can be used as a drop-in
@@ -140,6 +141,7 @@ class ArcticRLClientWrapper:
             host="localhost",
             port=7000,
             backend="local",
+            # TODO: Grab GPU counts from VeRL config
             training_gpus=1,
             sample_gpus=1,
             log_prob_gpus=1,
@@ -152,6 +154,7 @@ class ArcticRLClientWrapper:
                 "sequence_parallel_size": 1,
                 "zero_optimization": {"stage": 1},
             },
+            # TODO: Grab training config from VeRL config
             training_config={
                 "optimizer": {"lr": 0.0002, "weight_decay": 0.0, "betas": [0.9, 0.999]},
                 "lr_scheduler": {"warmup_ratio": 0.05},
@@ -162,10 +165,17 @@ class ArcticRLClientWrapper:
             },
             vllm_config=None,
         )
-        os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2"
+
+        # Feels like a hack, but ArcticRLClient is constructed as a ray remote
+        # actor with num_gpus=0 - This causes CUDA_VISIBLE_DEVICES to be empty,
+        # so we need to set it manually.
+        num_gpus = config.training_gpus + config.sample_gpus + config.log_prob_gpus
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(num_gpus))
+
         self._client = ArcticRLClient(config)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
 
+    # TODO: Just for debugging - remove later
     _default_sampling_params = {
         "temperature": 0.0,
         "top_p": 1.0,
@@ -174,11 +184,8 @@ class ArcticRLClientWrapper:
     }
 
     def generate(self, prompt_ids, sampling_params) -> list:
-        prompts = [self.tokenizer.decode(prompt_ids)]
-        if sampling_params is not None and not isinstance(sampling_params, dict):
-            merged_params = {**self._default_sampling_params, **vars(sampling_params)}
-        else:
-            merged_params = {**self._default_sampling_params, **(sampling_params or {})}
+        prompts = [self.tokenizer.decode(prompt_ids)] # TODO: pass prompt_ids directly
+        merged_params = {**self._default_sampling_params, **vars(sampling_params)}
         return self._client.generate(prompts=prompts, sampling_params=merged_params)
 
     def compute_log_prob(self, dss_batch_dict: dict):
@@ -201,11 +208,21 @@ class ArcticRLClientWrapper:
 
     def update_actor(self, dss_batch_dict: dict, post_process_inputs: dict):
         extra = post_process_inputs.get("extra_inputs", {})
+        seq_len = dss_batch_dict["input_ids"].shape[-1]
+
+        def _left_pad(t: torch.Tensor) -> torch.Tensor:
+            """Left-pad a response-only tensor to full sequence length with zeros."""
+            pad_len = seq_len - t.shape[-1]
+            if pad_len <= 0:
+                return t
+            pad = torch.zeros(*t.shape[:-1], pad_len, dtype=t.dtype, device=t.device)
+            return torch.cat([pad, t], dim=-1)
+
         context = {
             "labels": dss_batch_dict["labels"],
-            "old_logprobs": extra["old_log_probs"],
-            "advantages": extra["advantages"],
-            "loss_mask": extra["response_mask"],
+            "old_logprobs": _left_pad(extra["old_log_probs"]),
+            "advantages": _left_pad(extra["advantages"]),
+            "loss_mask": _left_pad(extra["response_mask"]),
         }
         batch = {"kwargs": dss_batch_dict, "context": context}
 
