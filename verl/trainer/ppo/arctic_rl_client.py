@@ -207,6 +207,7 @@ class ArcticRLClientWrapper:
         return entropy, log_probs
 
     def update_actor(self, dss_batch_dict: dict, post_process_inputs: dict):
+        # TODO: Does this align with the ArcticRLClient4VeRL + dss-platform:verl_integration branch?
         extra = post_process_inputs.get("extra_inputs", {})
         seq_len = dss_batch_dict["input_ids"].shape[-1]
 
