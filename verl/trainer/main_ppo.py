@@ -134,6 +134,10 @@ class TaskRunner:
             actor_rollout_cls = ActorRolloutRefWorker
             ray_worker_group_cls = RayWorkerGroup
 
+            if config.trainer.get("use_arctic_rl", False):
+                from verl.workers.arctic_workers import ActorRolloutRefWorker
+                actor_rollout_cls = ActorRolloutRefWorker
+
             lora_rank = config.actor_rollout_ref.model.get("lora", {}).get("rank", 0)
             if lora_rank <= 0:
                 lora_rank = config.actor_rollout_ref.model.get("lora_rank", 0)
@@ -340,7 +344,9 @@ class TaskRunner:
         train_sampler = create_rl_sampler(config.data, train_dataset)
 
         # Initialize the PPO trainer.
-        trainer = RayPPOTrainer(
+        from verl.trainer.ppo.arctic_trainer import ArcticPPOTrainer
+        ppo_trainer_cls = RayPPOTrainer if not config.trainer.use_arctic_rl else ArcticPPOTrainer
+        trainer = ppo_trainer_cls(
             config=config,
             tokenizer=tokenizer,
             processor=processor,
@@ -356,7 +362,12 @@ class TaskRunner:
         trainer.init_workers()
 
         # Start the training process.
-        trainer.fit()
+        try:
+            trainer.fit()
+        finally:
+            # Ensure remote services shutdown gracefully
+            if hasattr(trainer, "destroy"):
+                trainer.destroy()
 
 
 def create_rl_dataset(data_paths, data_config, tokenizer, processor, is_train=True, max_samples: int = -1):
