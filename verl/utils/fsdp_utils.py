@@ -227,6 +227,19 @@ def load_fsdp_optimizer(optimizer, device_id):
                     state[key] = value.to(device_id, non_blocking=True)
 
 
+@torch.no_grad()
+def get_fsdp_optimizer_devices(optimizer) -> list[torch.device]:
+    devices = set()
+    for param_group in optimizer.param_groups:
+        for param in param_group["params"]:
+            state = optimizer.state[param]
+            devices.add(param.device)
+            for key, value in state.items():
+                if isinstance(value, torch.Tensor):
+                    devices.add(value.device)
+    
+    return list(devices)
+
 @contextmanager
 def meta_device_init():
     """
