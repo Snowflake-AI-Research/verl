@@ -1,4 +1,3 @@
-import io
 import os
 import torch
 from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer
@@ -8,9 +7,6 @@ import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from ray.util.placement_group import placement_group
 from verl.workers.rollout.replica import TokenOutput
-from tensordict import TensorDict
-from typing import Any
-from verl.utils.ray_utils import auto_await
 
 USE_ARCTIC_TRAINING_CLIENT = os.environ.get("USE_ARCTIC_TRAINING_CLIENT", "0") == "1"
 
