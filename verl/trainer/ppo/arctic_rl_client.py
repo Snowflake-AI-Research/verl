@@ -88,31 +88,42 @@ class ArcticRLClient4VeRL:
 
     def generate(self, prompt_ids, sampling_params) -> TokenOutput:
         prompts = [self.tokenizer.decode(prompt_ids)]
-        result = self.inference_engine.generate(
+        return self.inference_engine.generate(
             prompts=prompts,
+            sampling_params=sampling_params,
         )
-        return result
 
-    def compute_log_prob(self, dss_batch_dict: dict):
+    def compute_log_prob(self, dss_batch_dict: dict, post_process_inputs: dict):
+        dss_batch_dict.update(post_process_inputs=post_process_inputs)
+
         # XXX: somehow we need to differentiate which model is this called on ref vs actor - at the moment it's always actor hardcoded
         entropy, log_probs = self.training_engine.fwd_no_grad(**dss_batch_dict)
 
+        # XXX: for some reason no_padding_2_padding expects a 1D tensor - not sure how it'll work for
+        # bs>1
+        # I think it may have to do with tensor.is_nested - different path/logic
+        # so most likely we need to convert these 2 into TensorDict
         if entropy is not None:
             # prior_entropy_shape = entropy.shape
             entropy = torch.tensor(entropy).squeeze()
         if log_probs is not None:
             # prior_log_probs_shape = log_probs.shape
             log_probs = torch.tensor(log_probs).squeeze()
+        print(f"arctic_rl_client.compute_log_prob: {entropy.shape=}, {log_probs.shape=}")
         return entropy, log_probs
 
 
     def update_actor(self, dss_batch_dict: dict, post_process_inputs: dict):
+
         dss_batch_dict.update(post_process_inputs=post_process_inputs)
 
+        #_ = self.training_engine.forward(**dss_batch_dict, post_process_inputs=post_process_inputs)
         _ = self.training_engine.forward(**dss_batch_dict)
         loss, metrics = self.training_engine.backward()
         self.training_engine.step()
 
+        print(f"arctic_rl_client.update_actor: {loss=}")
+        print(f"arctic_rl_client.update_actor: {metrics=}")
         return loss.cpu().item(), metrics
 
     def destroy(self):
