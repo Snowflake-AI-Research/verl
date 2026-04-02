@@ -203,9 +203,6 @@ trainer:
   #  mode: "auto", "enable", or "disable"
   use_legacy_worker_impl: auto
 
-  # whether to use arctic rl 
-  use_arctic_rl: False
-
 # profiler configs
 global_profiler:
 
