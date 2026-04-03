@@ -90,6 +90,18 @@ class ArcticRLClient4VeRL:
             sampling_params=sampling_params,
         )
 
+    # TODO: this should use the reference engine instead of the training engine
+    def compute_ref_log_prob(self, dss_batch_dict: dict, post_process_inputs: dict):
+        dss_batch_dict.update(post_process_inputs=post_process_inputs)
+        entropy, log_probs = self.training_engine.fwd_no_grad(**dss_batch_dict)
+        if entropy is not None:
+            entropy = torch.tensor(entropy).squeeze()
+        if log_probs is not None:
+            log_probs = torch.tensor(log_probs).squeeze()
+        print(f"arctic_rl_client.compute_ref_log_prob: {entropy.shape=}, {log_probs.shape=}")
+        return entropy, log_probs
+    
+
     def compute_log_prob(self, dss_batch_dict: dict, post_process_inputs: dict):
         dss_batch_dict.update(post_process_inputs=post_process_inputs)
 

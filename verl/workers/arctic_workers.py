@@ -405,8 +405,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
-    def train_mini_batch(self, data: TensorDict) -> TensorDict:
-        """Split a batch into N mini-batches run for multiple epochs
+    def train_global_batch(self, data: TensorDict) -> TensorDict:
+        """Train a global batch
 
         Args:
             data:
@@ -414,62 +414,39 @@ class TrainingWorker(Worker, DistProfilerExtension):
         Returns:
 
         """
-        batch_size_per_dp = data.shape[0]
         disable_auto_offload = tu.pop(data, key="disable_auto_offload", default=False)
-        mini_batch_size = tu.pop(data, key="mini_batch_size", default=None)
-        num_mini_batch = tu.pop(data, key="num_mini_batch", default=None)
-        epochs = tu.pop(data, key="epochs", default=1)
-        seed = tu.pop(data, key="seed", default=42)
-        dataloader_kwargs = tu.pop(data, key="dataloader_kwargs", default={})
 
         self.engine_config = self.config.engine_config
-
-        assert mini_batch_size is not None or num_mini_batch is not None
-
-        mini_batch_size_per_gpu = mini_batch_size
-
-        # make iterator
-        dataloader = tu.make_iterator(
-            data,
-            mini_batch_size=mini_batch_size_per_gpu,
-            epochs=epochs,
-            seed=seed,
-            dataloader_kwargs=dataloader_kwargs,
-        )
 
         with (
             Timer(name="train_batch", logger=None),
         ):
             # update
-            output_lst = []
-            total_num_iterations = data.shape[0] // mini_batch_size_per_gpu * epochs
+            global_token_num = data["input_ids"].offsets().diff().tolist()  # (total_nnz,)
+            tu.assign_non_tensor(
+                data,
+                global_token_num=NonTensorData(global_token_num),
+                update_lr_scheduler=True,
+                disable_auto_offload=disable_auto_offload,
+            )
 
-            for batch_idx, mini_batch_td in enumerate(dataloader):
-                # add global token num
-                global_token_num = mini_batch_td["input_ids"].offsets().diff().tolist()  # (total_nnz,)
-                tu.assign_non_tensor(
-                    mini_batch_td,
-                    global_token_num=NonTensorData(global_token_num),
-                    update_lr_scheduler=batch_idx == total_num_iterations - 1,
-                    disable_auto_offload=True,
-                )
-                actor_output = self.train_batch(mini_batch_td)
-                output_lst.append(actor_output)
+            actor_output = self.train_batch(data)
 
-            actor_output = [tu.get(output, "metrics") for output in output_lst]
+            output_metrics = tu.get(actor_output, "metrics")
+
             metrics = {}
-            for output in actor_output:
-                for key, val in output.items():
-                    print(f"metrics {key=} {val=}")
+            for key, val in output_metrics.items():
+                print(f"metrics {key=} {val=}")
 
-                    # flattn dp and micro batch
-                    if isinstance(val, list):
-                        output[key] = (
-                            Metric.aggregate_dp(val)
-                            if isinstance(val[0], Metric)
-                            else list(chain.from_iterable(val))
-                        )
-                append_to_dict(metrics, output)
+                # flattn dp and micro batch
+                if isinstance(val, list):
+                    output_metrics[key] = (
+                        Metric.aggregate_dp(val)
+                        if isinstance(val[0], Metric)
+                        else list(chain.from_iterable(val))
+                    )
+
+            append_to_dict(metrics, output_metrics)
 
             output = tu.get_tensordict(tensor_dict={}, non_tensor_dict={"metrics": metrics}).cpu()
 
@@ -562,7 +539,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             policy_loss_config = safe_serialize(vars(self.actor_config.policy_loss))
 
             post_process_inputs = dict(actor_config=actor_config_as_dict, policy_loss_config=policy_loss_config, extra_inputs=extra_inputs)
-            print(f"update_actor: {post_process_inputs=}")
+            # print(f"update_actor: {post_process_inputs=}")
 
             # XXX: pass the original batch as post_process_inputs["batch"] - the ppo loss function expects data["prompts"]
             # it got stripped and is not in dss_batch_dict
@@ -793,7 +770,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         self._update_config_params(data)
         post_process_inputs  = prepare_log_prob_extra_inputs(data)       
-        entropy, log_probs = ray.get(self.arctic_rl_client.compute_log_prob.remote(dss_batch_dict, post_process_inputs))
+        entropy, log_probs = ray.get(self.arctic_rl_client.compute_ref_log_prob.remote(dss_batch_dict, post_process_inputs))
 
         batch_output = postprocess_log_prob_output(data=data, entropy=entropy, log_probs=log_probs)
         model_output = batch_output.pop("model_output", {})
@@ -859,7 +836,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
     def update_actor(self, data: TensorDict) -> TensorDict:
-        output = self.actor.train_mini_batch(data=data)
+        output = self.actor.train_global_batch(data=data)
         return output.cpu() if output is not None else None
 
 
@@ -891,16 +868,16 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     # TODO: Rollout API Begin
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
     async def generate_sequences(self, batch: DataProto):
-        print(f"{batch.non_tensor_batch=}")
+        # print(f"{batch.non_tensor_batch=}")
         raw_prompts = list(batch.non_tensor_batch["raw_prompt"])
-        print(f"{raw_prompts=}")
+        # print(f"{raw_prompts=}")
         prompts = self.tokenizer.apply_chat_template(
             raw_prompts,
             add_generation_prompt=True,
             tokenize=False,
         )
         # import pdb; pdb.set_trace()
-        print(f"prompts: {prompts}")
+        # print(f"prompts: {prompts}")
         metrics = {}
 
         gen_batch_output = self.arctic_inference_engine.generate(prompts=prompts)
