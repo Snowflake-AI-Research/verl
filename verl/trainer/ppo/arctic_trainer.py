@@ -41,7 +41,7 @@ class ArcticPPOTrainer(RayPPOTrainer):
         device_name=device_name)
 
         self.use_gpu = False
-        self.rl_client = create_arctic_rl_client()
+        self.rl_client = create_arctic_rl_client(config=config)
         self.rl_client.initialize.remote(model_name="Qwen/Qwen3-0.6B")
         self.wg_kwargs["arctic_rl_client"] = self.rl_client
         
