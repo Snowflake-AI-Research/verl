@@ -218,6 +218,8 @@ def prepare_log_prob_extra_inputs(data: TensorDict) -> dict:
             cu_seqlens=data["input_ids"].offsets()
         )
 
+        print(f"prepare_log_prob_extra_inputs: {data['input_ids'].shape=} {ready_input_ids.shape=} {data['position_ids'].shape=} {ready_position_ids.shape=}")
+
         return extra_inputs
 
 
@@ -436,7 +438,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
             metrics = {}
             for key, val in output_metrics.items():
-                print(f"metrics {key=} {val=}")
+                # print(f"metrics {key=} {val=}")
 
                 # flattn dp and micro batch
                 if isinstance(val, list):
@@ -556,8 +558,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
             loss, metrics = ray.get(self.arctic_rl_client.update_actor.remote(dss_batch_dict, post_process_inputs))
             # output = ray.get(self.arctic_rl_client.update_actor.remote(dss_batch_dict, post_process_inputs))
-            print(f"update_actor: {loss=}")
-            print(f"update_actor: {metrics=}")
+            # print(f"update_actor: {loss=}")
+            # print(f"update_actor: {metrics=}")
 
 
         from verl.utils.metric import AggregationType, Metric
@@ -577,7 +579,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         #     'grad_norm': None,
         # }
 
-        print(f"{data=}")
+        # print(f"{data=}")
         print(f"{data["input_ids"].shape=}")
         model_output = {
             # XXX: fix me - made a copy of existing same shape tensor for now
