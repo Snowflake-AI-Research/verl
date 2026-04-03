@@ -11,7 +11,7 @@ from verl.workers.rollout.replica import TokenOutput
 USE_ARCTIC_TRAINING_CLIENT = os.environ.get("USE_ARCTIC_TRAINING_CLIENT", "0") == "1"
 
 
-def create_arctic_rl_client():
+def create_arctic_rl_client(config):
     cls = ArcticRLClientWrapper if USE_ARCTIC_TRAINING_CLIENT else ArcticRLClient4VeRL
     sched_pg = placement_group([{"GPU": 0, "CPU": 1}])
     return ray.remote(
@@ -219,10 +219,13 @@ class ArcticRLClientWrapper:
 
     def generate(self, prompt_ids, sampling_params) -> list:
         prompts = [self.tokenizer.decode(prompt_ids)] # TODO: pass prompt_ids directly
-        merged_params = {**self._default_sampling_params, **vars(sampling_params)}
+        merged_params = {**self._default_sampling_params, **sampling_params}
         return self._client.generate(prompts=prompts, sampling_params=merged_params)
 
-    def compute_log_prob(self, dss_batch_dict: dict):
+    def compute_ref_log_prob(self, dss_batch_dict: dict, post_process_inputs: dict = None):
+        return self.compute_log_prob(dss_batch_dict, post_process_inputs)
+
+    def compute_log_prob(self, dss_batch_dict: dict, post_process_inputs: dict = None):
         batch = {
             "kwargs": dss_batch_dict,
             "context": {"labels": dss_batch_dict["labels"]},
@@ -234,9 +237,32 @@ class ArcticRLClientWrapper:
         log_probs = outputs.get("log_probs")
 
         if entropy is not None:
-            entropy = torch.tensor(entropy).squeeze()
+            entropy = torch.tensor(entropy)
         if log_probs is not None:
-            log_probs = torch.tensor(log_probs).squeeze()
+            log_probs = torch.tensor(log_probs)
+
+        # TODO: AI fix to resolve problems after merge into arl branch. Need to verify correctness of this.
+        # The model returns packed (1, total_nnz) tensors, but downstream
+        # rm_padding expects padded (bsz, max_seq_len). Unpack and re-pad.
+        if post_process_inputs is not None:
+            cu_seqlens = post_process_inputs["cu_seqlens"]
+            seq_lengths = cu_seqlens.diff()
+            bsz = seq_lengths.shape[0]
+            max_seq_len = int(seq_lengths.max())
+
+            def _packed_to_padded(t):
+                flat = t.reshape(-1)
+                padded = torch.zeros(bsz, max_seq_len, dtype=flat.dtype, device=flat.device)
+                for i in range(bsz):
+                    start = int(cu_seqlens[i])
+                    length = int(seq_lengths[i])
+                    padded[i, :length] = flat[start:start + length]
+                return padded
+
+            if entropy is not None:
+                entropy = _packed_to_padded(entropy)
+            if log_probs is not None:
+                log_probs = _packed_to_padded(log_probs)
 
         return entropy, log_probs
 
