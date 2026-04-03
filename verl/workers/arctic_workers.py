@@ -181,7 +181,7 @@ def prepare_extra_inputs(data: TensorDict) -> dict:
         prompts=data["prompts"],
         responses=data["responses"],
         attention_mask=data["attention_mask"],
-        max_response_len=data["max_response_len"],
+        max_token_len_per_gpu=data["max_token_len_per_gpu"],
         global_batch_size=data["global_batch_size"],
         response_mask=data["response_mask"],
         old_log_probs=data["old_log_probs"],
@@ -260,7 +260,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
     and do not provide exact APIs as Tinker does. But this can be added in the future.
     """
 
-    def __init__(self, config: TrainingWorkerConfig, actor_config: ActorConfig, arctic_rl_client):
+    def __init__(self, config: TrainingWorkerConfig, actor_config: ActorConfig, arctic_rl_client, tokenizer):
         Worker.__init__(self)
 
         from verl.workers.engine import BaseEngine, EngineRegistry
@@ -271,12 +271,15 @@ class TrainingWorker(Worker, DistProfilerExtension):
         self.actor_config = actor_config
 
         self.arctic_rl_client = arctic_rl_client
+        self.tokenizer = tokenizer
 
         self.model_config = self.config.model_config
         self.engine_config = self.config.engine_config
         self.optimizer_config = self.config.optimizer_config
         self.checkpoint_config = self.config.checkpoint_config
         self.device_name = get_device_name()
+
+        print(f"{self.engine_config=}")
 
         if self.engine_config is None:
             assert self.optimizer_config is None
@@ -487,19 +490,57 @@ class TrainingWorker(Worker, DistProfilerExtension):
             # batch = chunk_tensordict(data, 1)
             print(f"update_actor data: {data}")
 
+            # XXX: fix me
+            padding_token = 100
+            input_ids = data['input_ids']
+            position_ids = data['position_ids']
+            #input_ids = input_ids.unbind()
+
+            from verl.workers.utils.padding import no_padding_2_padding_prompt_response
+            # XXX: move to init
+            if self.tokenizer.pad_token_id is None:
+                self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+
+            input_ids, max_prompt_len, max_response_len = no_padding_2_padding_prompt_response(tensor=input_ids, data=data, pad_token_id=self.tokenizer.pad_token_id)
+            # XXX: 0 pad on pos ids is odd, check the original - perhaps need to re-build pos ids?
+            position_ids, _, _= no_padding_2_padding_prompt_response(tensor=position_ids, data=data, pad_token_id=0)
+            print(f"{input_ids.shape=}")
+            print(f"{input_ids=}")
+
+            #input_ids = torch.nested.to_padded_tensor(input_ids, padding=4.2)
+            #position_ids = torch.nested.to_padded_tensor(position_ids, padding=4.2)
+
+            print(f"{data['attention_mask'].shape=}")
+            print(f"{data['attention_mask']=}")
+            print(f"{input_ids.shape=}")
+            print(f"{input_ids=}")
+            print(f"{position_ids.shape=}")
+            print(f"{position_ids=}")
             # XXX: fixme
             # batch = batch[0]
 
-            dss_batch_dict, output_args = prepare_model_inputs_remove_padding(data)
+            #dss_batch_dict, output_args = prepare_model_inputs_remove_padding(data)
+            # print(f"{dss_batch_dict=}")
+            #print(f"{output_args=}")
+            #import pdb; pdb.set_trace()
+
+            dss_batch_dict = dict(
+                input_ids=input_ids,
+                position_ids=position_ids,
+                attention_mask=data['attention_mask'],
+                labels=input_ids,
+            )
             print(f"{dss_batch_dict=}")
-            print(f"{output_args=}")
-            # import pdb; pdb.set_trace()
+
+
+            rollout_n = self.actor_config.rollout_n
+            max_token_len_per_gpu = self.actor_config.ppo_max_token_len_per_gpu
 
             # we need to serialize the config object to dict
             # dataclasses.asdict only returns keys that are defined at init (vars will do more) - but perhaps we want `asdict`?
             actor_config_as_dict = vars(self.actor_config)
             print(f"update_actor: {self.actor_config=}")
-            print(f"update_actor: {actor_config_as_dict}")
+            print(f"update_actor: {actor_config_as_dict=}")
             import json
             def safe_serialize(obj):
                 return json.loads(json.dumps(obj, default=lambda o: None))
@@ -507,35 +548,10 @@ class TrainingWorker(Worker, DistProfilerExtension):
             actor_config_as_dict = safe_serialize(actor_config_as_dict)
 
 
-            # pad_token_id = tu.get_non_tensor_data(data=data, key="pad_token_id", default=0)
-            # batch_size = data["input_ids"].shape[0]
-            # seq_len_effective = data["input_ids"].offsets().diff()
-            # max_seq_len = max(seq_len_effective)
-            # ready_input_ids = torch.nested.to_padded_tensor(
-            #     data["input_ids"], padding=pad_token_id, output_size=(batch_size, max_seq_len)
-            # )
-            # ready_position_ids = torch.nested.to_padded_tensor(
-            #     data["position_ids"], padding=0, output_size=(batch_size, max_seq_len)
-            # )
-            # extra_inputs = dict(
-            #     prompts=data["prompts"],
-            #     responses=data["responses"],
-            #     attention_mask=data["attention_mask"],
-            #     max_response_len=data["max_response_len"],
-            #     global_batch_size=data["global_batch_size"],
-            #     response_mask=data["response_mask"],
-            #     old_log_probs=data["old_log_probs"],
-            #     advantages=data["advantages"],
-            #     ref_log_prob=data["ref_log_prob"],
-            #     rollout_is_weights=data.get("rollout_is_weights", None),
-            #     ready_input_ids=ready_input_ids,
-            #     ready_position_ids=ready_position_ids,
-            #     ready_labels=ready_input_ids,
-            #     # =batch[""],
-            # )
-            # extra_inputs["batch_num_tokens"] = data["loss_mask"].sum()
-
             extra_inputs = prepare_extra_inputs(data)
+            extra_inputs["rollout_n"] = rollout_n
+            extra_inputs["max_prompt_len"] = max_prompt_len
+            extra_inputs["max_response_len"] = max_response_len
             policy_loss_config = safe_serialize(vars(self.actor_config.policy_loss))
 
             post_process_inputs = dict(actor_config=actor_config_as_dict, policy_loss_config=policy_loss_config, extra_inputs=extra_inputs)
@@ -691,7 +707,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 assert self.config.rollout.log_prob_micro_batch_size_per_gpu is not None
                 assert self.config.actor.ppo_micro_batch_size_per_gpu is not None
 
-            self.actor = TrainingWorker(config=actor_training_config, actor_config=actor_config, arctic_rl_client=self.arctic_rl_client)
+            # XXX: fix me - duplicated in _init_engines and model hardcoded
+            self.tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+            self.actor = TrainingWorker(config=actor_training_config, actor_config=actor_config, arctic_rl_client=self.arctic_rl_client, tokenizer=self.tokenizer )
 
             self.actor.reset()
             self.loss_fn = partial(ppo_loss, config=actor_config)
@@ -758,7 +776,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # import pdb; pdb.set_trace()
         # from verl.utils.tensordict_utils import chunk_tensordict
         # batch = chunk_tensordict(data, 1)
-        # print(f"compute_ref_log_prob data: {data}")
+        print(f"compute_ref_log_prob data: {data}")
         dss_batch_dict, output_args = prepare_model_inputs_remove_padding(data)
         # print(f"{dss_batch_dict=}")
         # import pdb; pdb.set_trace()
@@ -805,7 +823,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # import pdb; pdb.set_trace()
         # from verl.utils.tensordict_utils import chunk_tensordict
         # batch = chunk_tensordict(data, 1)
-        # print(f"compute_log_prob data: {data}")
+        print(f"compute_log_prob data: {data}")
         dss_batch_dict, output_args = prepare_model_inputs_remove_padding(data)
         # print(f"{dss_batch_dict=}")
         # import pdb; pdb.set_trace()
