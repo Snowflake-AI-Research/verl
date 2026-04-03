@@ -30,10 +30,17 @@ def create_meta_model(name_or_path: str):
     return meta_model
 
 class ArcticRLClient4VeRL:
-    def __init__(self):
+    def __init__(self, config):
+        """
+        config: verl's full config
+        """
+        self.config = config
+        #print(f"ArcticRLClient4VeRL {config=}")
+
         self.arctic_inference_client = DSSInferenceClient(dss_server_url="http://localhost:7000")
         self.arctic_training_client = DSSTrainingClient(dss_server_url="http://localhost:7000")
         self.arctic_log_prob_client = DSSLogProbClient(dss_server_url="http://localhost:7000")
+
 
     def initialize(self, model_name: str):
         vllm_config = {
@@ -62,6 +69,14 @@ class ArcticRLClient4VeRL:
                 "stage": 1,
             },
         }
+
+        # currently verl wants '+' before the setting, i.e. +actor_rollout_ref.model.override_config.attn_implementation=flash_attention_3
+        attn_implementation = self.config.actor_rollout_ref.model.override_config.get('attn_implementation', 'eager')
+        if attn_implementation == "eager":
+            raise ValueError("set actor_rollout_ref.model.override_config.attn_implementation to some variant of flash attention")
+
+        #attn_implementation="flash_attention_3"
+
         training_config = {
             "optimizer": {
                 "lr": 0.0002,
@@ -72,7 +87,7 @@ class ArcticRLClient4VeRL:
             "training_horizon": 10,
             "max_length": 8096,
             "model_config": None,
-            "attn_implementation": "eager",
+            "attn_implementation": attn_implementation,
         }
 
         self.training_engine = self.arctic_training_client.initialize(
@@ -88,6 +103,18 @@ class ArcticRLClient4VeRL:
             prompts=prompts,
             sampling_params=sampling_params,
         )
+
+    # TODO: this should use the reference engine instead of the training engine
+    def compute_ref_log_prob(self, dss_batch_dict: dict, post_process_inputs: dict):
+        dss_batch_dict.update(post_process_inputs=post_process_inputs)
+        entropy, log_probs = self.training_engine.fwd_no_grad(**dss_batch_dict)
+        if entropy is not None:
+            entropy = torch.tensor(entropy).squeeze()
+        if log_probs is not None:
+            log_probs = torch.tensor(log_probs).squeeze()
+        print(f"arctic_rl_client.compute_ref_log_prob: {entropy.shape=}, {log_probs.shape=}")
+        return entropy, log_probs
+    
 
     def compute_log_prob(self, dss_batch_dict: dict, post_process_inputs: dict):
         dss_batch_dict.update(post_process_inputs=post_process_inputs)

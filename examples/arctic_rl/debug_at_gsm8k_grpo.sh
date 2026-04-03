@@ -9,29 +9,28 @@ export RAY_DEDUP_LOGS=0
 export CUDA_VISIBLE_DEVICES=
 
 # BSZ=1024
-BSZ=2
-MBS=2
-UBS=2
-ROLL_N=2
-MAX_STEPS=1
+BSZ=1
+MBS=1
+UBS=1
+ROLL_N=4
+MAX_STEPS=4
 # LR=0
 LR=1e-6
 LOGGER=console
 # LOGGER="['console','wandb']"
 USE_KL_LOSS=True
 # USE_KL_LOSS=False
-# REMOVE_PADDING=True
-REMOVE_PADDING=False
+REMOVE_PADDING=True
+# REMOVE_PADDING=False
 MODEL="Qwen/Qwen3-0.6B"
 # STRATEGY="fsdp"
 STRATEGY="fsdp2"
 PYTHONUNBUFFERED=1
 HYDRA_FULL_ERROR=1
 USE_LEGACY_WORKER_IMPL=disable
+USE_ARCTIC_RL=True
 NGPU_PER_NODE=1
 ROLLOUT_NAME=arctic # entry point into ArcticRL
-USE_ARCTIC_RL=True
-
 experiment_name="qwen3-0.6B_ngpu${NGPU_PER_NODE}_gbs${BSZ}_rolln${ROLL_N}_at${USE_ARCTIC_RL}"
 
 gpu_name=$(nvidia-smi --query-gpu=gpu_name  --format=csv,noheader -i 0)
