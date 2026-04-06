@@ -128,10 +128,8 @@ class ArcticRLClient4VeRL:
         # I think it may have to do with tensor.is_nested - different path/logic
         # so most likely we need to convert these 2 into TensorDict
         if entropy is not None:
-            # prior_entropy_shape = entropy.shape
             entropy = torch.tensor(entropy).squeeze()
         if log_probs is not None:
-            # prior_log_probs_shape = log_probs.shape
             log_probs = torch.tensor(log_probs).squeeze()
         print(f"arctic_rl_client.compute_log_prob: {entropy.shape=}, {log_probs.shape=}")
         return entropy, log_probs

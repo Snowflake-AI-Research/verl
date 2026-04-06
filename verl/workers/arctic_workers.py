@@ -35,6 +35,7 @@ from codetiming import Timer
 from omegaconf import DictConfig, open_dict
 from tensordict import NonTensorData, TensorDict
 from torch.distributed.device_mesh import init_device_mesh
+import torch.nn.functional as F
 
 try:
     from verl.workers.engine.mindspeed.transformer_impl import repatch
@@ -165,17 +166,10 @@ def prepare_model_inputs_remove_padding(micro_batch: TensorDict):
 
 
 
-def prepare_extra_inputs(data: TensorDict) -> dict:
+def prepare_extra_inputs(data: TensorDict, max_prompt_len: int) -> dict:
     pad_token_id = tu.get_non_tensor_data(data=data, key="pad_token_id", default=0)
-    batch_size = data["input_ids"].shape[0]
-    seq_len_effective = data["input_ids"].offsets().diff()
-    max_seq_len = max(seq_len_effective)
-    ready_input_ids = torch.nested.to_padded_tensor(
-        data["input_ids"], padding=pad_token_id, output_size=(batch_size, max_seq_len)
-    )
-    ready_position_ids = torch.nested.to_padded_tensor(
-        data["position_ids"], padding=0, output_size=(batch_size, max_seq_len)
-    )
+    tensors_to_pad = ["advantages", "ref_log_prob", "old_log_probs", "response_mask"]
+    padded_tensors = {k: F.pad(data[k], pad=(max_prompt_len, 0), value=pad_token_id) for k in tensors_to_pad}
 
     extra_inputs = dict(
         prompts=data["prompts"],
@@ -183,47 +177,18 @@ def prepare_extra_inputs(data: TensorDict) -> dict:
         attention_mask=data["attention_mask"],
         max_token_len_per_gpu=data["max_token_len_per_gpu"],
         global_batch_size=data["global_batch_size"],
-        response_mask=data["response_mask"],
-        old_log_probs=data["old_log_probs"],
-        advantages=data["advantages"],
-        ref_log_prob=data["ref_log_prob"],
+        response_mask=padded_tensors["response_mask"],
+        old_log_probs=padded_tensors["old_log_probs"],
+        advantages=padded_tensors["advantages"],
+        ref_log_prob=padded_tensors["ref_log_prob"],
         rollout_is_weights=data.get("rollout_is_weights", None),
         batch_num_tokens=data["loss_mask"].sum(),
-        ready_input_ids=ready_input_ids,
-        ready_position_ids=ready_position_ids,
-        ready_labels=ready_input_ids,
-        cu_seqlens=data["input_ids"].offsets(),
     )
-
 
     return extra_inputs
 
-def prepare_log_prob_extra_inputs(data: TensorDict) -> dict:
-        pad_token_id = tu.get_non_tensor_data(data=data, key="pad_token_id", default=0)
-        batch_size = data["input_ids"].shape[0]
-        seq_len_effective = data["input_ids"].offsets().diff()
-        max_seq_len = max(seq_len_effective)
 
-        ready_input_ids = torch.nested.to_padded_tensor(
-            data["input_ids"], padding=pad_token_id, output_size=(batch_size, max_seq_len)
-        )
-        ready_position_ids = torch.nested.to_padded_tensor(
-            data["position_ids"], padding=0, output_size=(batch_size, max_seq_len)
-        )
-
-        extra_inputs  = dict(
-            ready_input_ids=ready_input_ids,
-            ready_position_ids=ready_position_ids,
-            ready_labels=ready_input_ids,
-            cu_seqlens=data["input_ids"].offsets()
-        )
-
-        print(f"prepare_log_prob_extra_inputs: {data['input_ids'].shape=} {ready_input_ids.shape=} {data['position_ids'].shape=} {ready_position_ids.shape=}")
-
-        return extra_inputs
-
-
-def rm_padding(data: TensorDict, tensor: Tensor) -> Tensor:
+def make_njt(data: TensorDict, tensor: Tensor) -> Tensor:
     cu_seqlens = data["input_ids"].offsets()
     seq_lengths = cu_seqlens.diff() # (bsz,)
     starts = torch.zeros_like(seq_lengths, dtype=torch.int64) # (bsz,)
@@ -233,8 +198,8 @@ def rm_padding(data: TensorDict, tensor: Tensor) -> Tensor:
     return tensor
 
 def postprocess_log_prob_output(data: TensorDict, entropy: Tensor, log_probs: Tensor) -> TensorDict:
-    x_entropy = rm_padding(data, entropy)   
-    x_log_probs = rm_padding(data, log_probs)
+    x_entropy = make_njt(data, entropy)   
+    x_log_probs = make_njt(data, log_probs)
 
     print(f"postprocess_log_prob_output: {x_entropy.shape=} {x_log_probs.shape=} {entropy.shape=} {log_probs.shape=}")
 
@@ -254,6 +219,29 @@ def postprocess_log_prob_output(data: TensorDict, entropy: Tensor, log_probs: Te
 
     return postprocess_batch_func(output_lst=output_lst, indices=None, data=data)
 
+
+def prepare_padded_dss_batch_dict(data: TensorDict, pad_token_id) -> dict:
+    input_ids = data['input_ids']
+    position_ids = data['position_ids']
+
+    from verl.workers.utils.padding import no_padding_2_padding_prompt_response
+    orig_iput_ids_shape = input_ids.shape
+    orig_position_ids_shape = position_ids.shape
+    input_ids, _, _ = no_padding_2_padding_prompt_response(tensor=input_ids, data=data, pad_token_id=pad_token_id)
+    # XXX: 0 pad on pos ids is odd, check the original - perhaps need to re-build pos ids?
+    position_ids, _, _= no_padding_2_padding_prompt_response(tensor=position_ids, data=data, pad_token_id=0)
+    attention_mask = data['attention_mask']
+
+    print(f"{input_ids.shape=} {position_ids.shape=} {attention_mask.shape=} {orig_iput_ids_shape=} {orig_position_ids_shape=}")
+
+    dss_batch_dict = dict(
+        input_ids=input_ids,
+        position_ids=position_ids,
+        attention_mask=attention_mask,
+        labels=input_ids,
+    )
+
+    return dss_batch_dict
 
 class TrainingWorker(Worker, DistProfilerExtension):
     """
@@ -549,8 +537,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             #actor_config_as_dict = safe_serialize(self.actor_config)
             actor_config_as_dict = safe_serialize(actor_config_as_dict)
 
-
-            extra_inputs = prepare_extra_inputs(data)
+            extra_inputs = prepare_extra_inputs(data, max_prompt_len)
             extra_inputs["rollout_n"] = rollout_n
             extra_inputs["max_prompt_len"] = max_prompt_len
             extra_inputs["max_response_len"] = max_response_len
@@ -779,7 +766,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # from verl.utils.tensordict_utils import chunk_tensordict
         # batch = chunk_tensordict(data, 1)
         print(f"compute_ref_log_prob data: {data}")
-        dss_batch_dict, output_args = prepare_model_inputs_remove_padding(data)
+        # dss_batch_dict, output_args = prepare_model_inputs_remove_padding(data)
+        pad_token_id = tu.get_non_tensor_data(data=data, key="pad_token_id", default=0)
+        dss_batch_dict = prepare_padded_dss_batch_dict(data, pad_token_id)
         # print(f"{dss_batch_dict=}")
         # import pdb; pdb.set_trace()
         # self.dss_training_engine.forward(**dss_batch_dict)
@@ -789,7 +778,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # log_prob = self._loaded_dump_data["full_log_prob"]
 
         self._update_config_params(data)
-        post_process_inputs  = prepare_log_prob_extra_inputs(data)       
+        post_process_inputs  = dict()
         entropy, log_probs = ray.get(self.arctic_rl_client.compute_ref_log_prob.remote(dss_batch_dict, post_process_inputs))
 
         batch_output = postprocess_log_prob_output(data=data, entropy=entropy, log_probs=log_probs)
@@ -800,24 +789,9 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         }
         final_output = tu.get_tensordict(tensor_dict=model_output, non_tensor_dict={"metrics": metrics})
 
-
-        # metrics = {
-        #     "mfu": 0.0,
-        #     "loss": 1.0,
-        #     "batch_size": 1,
-        # }
-
-        # model_output = {
-        #     "log_probs": log_probs,
-        # }
-
-        # final_output = tu.get_tensordict(tensor_dict=model_output, non_tensor_dict={"metrics": metrics})
-
         return final_output
 
  
-
-
     # TODO: Actor API Begin
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
@@ -826,17 +800,12 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # from verl.utils.tensordict_utils import chunk_tensordict
         # batch = chunk_tensordict(data, 1)
         print(f"compute_log_prob data: {data}")
-        dss_batch_dict, output_args = prepare_model_inputs_remove_padding(data)
-        # print(f"{dss_batch_dict=}")
-        # import pdb; pdb.set_trace()
-        # self.dss_training_engine.forward(**dss_batch_dict)
-        # loss = self.dss_training_engine.backward()
-        # print(f"loss: {loss}")
-        # import pdb; pdb.set_trace()
-        # log_prob = self._loaded_dump_data["full_log_prob"]
+        # dss_batch_dict, output_args = prepare_model_inputs_remove_padding(data)
+        pad_token_id = tu.get_non_tensor_data(data=data, key="pad_token_id", default=0)
+        dss_batch_dict = prepare_padded_dss_batch_dict(data, pad_token_id)
 
         self._update_config_params(data)
-        post_process_inputs  = prepare_log_prob_extra_inputs(data)        
+        post_process_inputs  = dict()
         # print(f"compute_log_prob: {post_process_inputs=}")
 
         entropy, log_probs = ray.get(self.arctic_rl_client.compute_log_prob.remote(dss_batch_dict, post_process_inputs))
