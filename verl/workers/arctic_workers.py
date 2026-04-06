@@ -166,11 +166,13 @@ def prepare_model_inputs_remove_padding(micro_batch: TensorDict):
 
 
 
-def prepare_extra_inputs(data: TensorDict, max_prompt_len: int) -> dict:
+def prepare_extra_inputs(data: TensorDict, max_prompt_len: int, pad_to_prompt_len=True) -> dict:
     pad_token_id = tu.get_non_tensor_data(data=data, key="pad_token_id", default=0)
     tensors_to_pad = ["advantages", "ref_log_prob", "old_log_probs", "response_mask"]
-    padded_tensors = {k: F.pad(data[k], pad=(max_prompt_len, 0), value=pad_token_id) for k in tensors_to_pad}
-
+    if pad_to_prompt_len:
+        padded_tensors = {k: F.pad(data[k], pad=(max_prompt_len, 0), value=pad_token_id) for k in tensors_to_pad}
+    else:
+        padded_tensors = {k: data[k] for k in tensors_to_pad}
     extra_inputs = dict(
         prompts=data["prompts"],
         responses=data["responses"],
@@ -198,7 +200,7 @@ def make_njt(data: TensorDict, tensor: Tensor) -> Tensor:
     return tensor
 
 def postprocess_log_prob_output(data: TensorDict, entropy: Tensor, log_probs: Tensor) -> TensorDict:
-    x_entropy = make_njt(data, entropy)   
+    x_entropy = make_njt(data, entropy)
     x_log_probs = make_njt(data, log_probs)
 
     print(f"postprocess_log_prob_output: {x_entropy.shape=} {x_log_probs.shape=} {entropy.shape=} {log_probs.shape=}")
@@ -212,8 +214,8 @@ def postprocess_log_prob_output(data: TensorDict, entropy: Tensor, log_probs: Te
             "log_probs": micro_log_probs[i],
         }
         output_lst.append({
-            "model_output": model_output, 
-            "metrics": {}, 
+            "model_output": model_output,
+            "metrics": {},
             "loss": 0.0,
         })
 
@@ -450,6 +452,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
     def train_batch(self, data: TensorDict) -> TensorDict:
         assert self.loss_fn is not None, "loss function can't be None when calling train_batch"
 
+        use_zorro = True
+
         # global_token_num should be a list of number of tokens of each seq in this batch
         global_token_num = tu.get(data, key="global_token_num")
         disable_auto_offload = tu.get(data, key="disable_auto_offload", default=False)
@@ -519,9 +523,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 position_ids=position_ids,
                 attention_mask=data['attention_mask'],
                 labels=input_ids,
+                use_zorro=use_zorro,
             )
             print(f"{dss_batch_dict=}")
-
 
             rollout_n = self.actor_config.rollout_n
             max_token_len_per_gpu = self.actor_config.ppo_max_token_len_per_gpu
@@ -537,7 +541,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             #actor_config_as_dict = safe_serialize(self.actor_config)
             actor_config_as_dict = safe_serialize(actor_config_as_dict)
 
-            extra_inputs = prepare_extra_inputs(data, max_prompt_len)
+            extra_inputs = prepare_extra_inputs(data, max_prompt_len, pad_to_prompt_len=not use_zorro)
             extra_inputs["rollout_n"] = rollout_n
             extra_inputs["max_prompt_len"] = max_prompt_len
             extra_inputs["max_response_len"] = max_response_len
@@ -756,15 +760,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             if key not in data.keys():
                 tu.assign_non_tensor(data, **{key: val})
 
-    
+
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
     @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
     def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
-        # return self._loaded_dump_data["full_ref_log_prob"]
-        # import pdb; pdb.set_trace()
-        # from verl.utils.tensordict_utils import chunk_tensordict
-        # batch = chunk_tensordict(data, 1)
         print(f"compute_ref_log_prob data: {data}")
         # dss_batch_dict, output_args = prepare_model_inputs_remove_padding(data)
         pad_token_id = tu.get_non_tensor_data(data=data, key="pad_token_id", default=0)
@@ -791,14 +791,14 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         return final_output
 
- 
+
+
+
     # TODO: Actor API Begin
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
     def compute_log_prob(self, data: TensorDict) -> TensorDict:
-        # import pdb; pdb.set_trace()
-        # from verl.utils.tensordict_utils import chunk_tensordict
-        # batch = chunk_tensordict(data, 1)
+
         print(f"compute_log_prob data: {data}")
         # dss_batch_dict, output_args = prepare_model_inputs_remove_padding(data)
         pad_token_id = tu.get_non_tensor_data(data=data, key="pad_token_id", default=0)
@@ -807,7 +807,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         self._update_config_params(data)
         post_process_inputs  = dict()
         # print(f"compute_log_prob: {post_process_inputs=}")
-
         entropy, log_probs = ray.get(self.arctic_rl_client.compute_log_prob.remote(dss_batch_dict, post_process_inputs))
 
         # import pdb; pdb.set_trace()
