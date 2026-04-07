@@ -184,14 +184,14 @@ class ArcticRLClientWrapper:
             port=7000,
             backend="local",
             # TODO: Grab GPU counts from VeRL config
-            training_gpus=1,
+            training_gpus=2,
             sample_gpus=1,
             log_prob_gpus=1,
             log_prob_engine="deepspeed",
             model_name=model_name,
             ds_config={
                 "train_micro_batch_size_per_gpu": 1,
-                "train_batch_size": 1,
+                "train_batch_size": 2,
                 "gradient_accumulation_steps": 1,
                 "sequence_parallel_size": 1,
                 "zero_optimization": {"stage": 1},
@@ -213,6 +213,7 @@ class ArcticRLClientWrapper:
         # so we need to set it manually.
         num_gpus = config.training_gpus + config.sample_gpus + config.log_prob_gpus
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(num_gpus))
+        print(f"ArcticRLClientWrapper: {os.environ['CUDA_VISIBLE_DEVICES']=} {num_gpus=}")
 
         self._client = ArcticRLClient(config)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -248,29 +249,6 @@ class ArcticRLClientWrapper:
             entropy = torch.tensor(entropy)
         if log_probs is not None:
             log_probs = torch.tensor(log_probs)
-
-        # TODO: AI fix to resolve problems after merge into arl branch. Need to verify correctness of this.
-        # The model returns packed (1, total_nnz) tensors, but downstream
-        # rm_padding expects padded (bsz, max_seq_len). Unpack and re-pad.
-        if post_process_inputs is not None:
-            cu_seqlens = post_process_inputs["cu_seqlens"]
-            seq_lengths = cu_seqlens.diff()
-            bsz = seq_lengths.shape[0]
-            max_seq_len = int(seq_lengths.max())
-
-            def _packed_to_padded(t):
-                flat = t.reshape(-1)
-                padded = torch.zeros(bsz, max_seq_len, dtype=flat.dtype, device=flat.device)
-                for i in range(bsz):
-                    start = int(cu_seqlens[i])
-                    length = int(seq_lengths[i])
-                    padded[i, :length] = flat[start:start + length]
-                return padded
-
-            if entropy is not None:
-                entropy = _packed_to_padded(entropy)
-            if log_probs is not None:
-                log_probs = _packed_to_padded(log_probs)
 
         return entropy, log_probs
 
