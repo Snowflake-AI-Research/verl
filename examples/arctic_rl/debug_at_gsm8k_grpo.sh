@@ -1,6 +1,8 @@
 #!/bin/bash
 
 set -x
+# enable if HF hub misbehaves/times out (assuming you have already cached the models locally)
+# export HF_HUB_OFFLINE=1
 
 export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
@@ -8,10 +10,12 @@ export RAY_DEDUP_LOGS=0
 # we want to make sure this runs on non-gpu client
 export CUDA_VISIBLE_DEVICES=
 
+# export USE_ARCTIC_ZORRO=1
+
 # BSZ=1024
-BSZ=1
-MBS=1
-UBS=1
+BSZ=2
+MBS=2
+UBS=2
 ROLL_N=4
 MAX_STEPS=4
 # LR=0
@@ -50,7 +54,7 @@ python3 -m verl.trainer.main_ppo \
     data.val_files=/code/shared/gsm8k/test.parquet \
     data.train_batch_size=${BSZ} \
     data.max_prompt_length=64 \
-    data.max_response_length=96 \
+    data.max_response_length=16 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.shuffle=False \
