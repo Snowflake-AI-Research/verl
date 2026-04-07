@@ -270,6 +270,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         self.optimizer_config = self.config.optimizer_config
         self.checkpoint_config = self.config.checkpoint_config
         self.device_name = get_device_name()
+        self.use_zorro = ray.get(self.arctic_rl_client.is_zorro_enabled.remote())
 
         print(f"{self.engine_config=}")
 
@@ -452,7 +453,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
     def train_batch(self, data: TensorDict) -> TensorDict:
         assert self.loss_fn is not None, "loss function can't be None when calling train_batch"
 
-        use_zorro = True
 
         # global_token_num should be a list of number of tokens of each seq in this batch
         global_token_num = tu.get(data, key="global_token_num")
@@ -523,7 +523,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 position_ids=position_ids,
                 attention_mask=data['attention_mask'],
                 labels=input_ids,
-                use_zorro=use_zorro,
+                use_zorro=self.use_zorro,
             )
             print(f"{dss_batch_dict=}")
 
@@ -541,7 +541,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             #actor_config_as_dict = safe_serialize(self.actor_config)
             actor_config_as_dict = safe_serialize(actor_config_as_dict)
 
-            extra_inputs = prepare_extra_inputs(data, max_prompt_len, pad_to_prompt_len=not use_zorro)
+            extra_inputs = prepare_extra_inputs(data, max_prompt_len, pad_to_prompt_len=not self.use_zorro)
             extra_inputs["rollout_n"] = rollout_n
             extra_inputs["max_prompt_len"] = max_prompt_len
             extra_inputs["max_response_len"] = max_response_len

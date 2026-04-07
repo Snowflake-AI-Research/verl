@@ -9,6 +9,7 @@ from ray.util.placement_group import placement_group
 from verl.workers.rollout.replica import TokenOutput
 
 USE_ARCTIC_TRAINING_CLIENT = os.environ.get("USE_ARCTIC_TRAINING_CLIENT", "0") == "1"
+USE_ARCTIC_ZORRO = os.environ.get("USE_ARCTIC_ZORRO", "0") == "1"
 
 
 def create_arctic_rl_client(config):
@@ -21,7 +22,7 @@ def create_arctic_rl_client(config):
             placement_group=sched_pg,
             placement_group_capture_child_tasks=True,
         ),
-    )(cls).remote()
+    )(cls).remote(config)
 
 def create_meta_model(name_or_path: str):
     model_config = AutoConfig.from_pretrained(name_or_path)
@@ -35,12 +36,16 @@ class ArcticRLClient4VeRL:
         config: verl's full config
         """
         self.config = config
+        self.use_zorro = USE_ARCTIC_ZORRO
         #print(f"ArcticRLClient4VeRL {config=}")
 
         self.arctic_inference_client = DSSInferenceClient(dss_server_url="http://localhost:7000")
         self.arctic_training_client = DSSTrainingClient(dss_server_url="http://localhost:7000")
         self.arctic_log_prob_client = DSSLogProbClient(dss_server_url="http://localhost:7000")
 
+
+    def is_zorro_enabled(self):
+        return self.use_zorro
 
     def initialize(self, model_name: str):
         vllm_config = {
@@ -162,9 +167,14 @@ class ArcticRLClientWrapper:
     Set USE_ARCTIC_TRAINING_CLIENT=1 env var to activate.
     """
 
-    def __init__(self):
+    def __init__(self, config):
+        self.config = config
         self._client = None
         self.tokenizer = None
+        self.use_zorro = USE_ARCTIC_ZORRO
+
+    def is_zorro_enabled(self):
+        return self.use_zorro
 
     def initialize(self, model_name: str):
         from arctic_training.arctic_rl import ArcticRLClient, ArcticRLClientConfig
