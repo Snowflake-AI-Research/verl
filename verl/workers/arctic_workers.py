@@ -545,9 +545,14 @@ class TrainingWorker(Worker, DistProfilerExtension):
             actor_config_as_dict = safe_serialize(actor_config_as_dict)
 
             extra_inputs = prepare_extra_inputs(data, max_prompt_len, pad_to_prompt_len=not self.use_zorro)
-            extra_inputs["rollout_n"] = rollout_n
-            extra_inputs["max_prompt_len"] = max_prompt_len
-            extra_inputs["max_response_len"] = max_response_len
+            extra_inputs.update(
+                rollout_n=rollout_n,
+                max_prompt_len=max_prompt_len,
+                max_response_len=max_response_len,
+                max_token_len_per_gpu=data["max_token_len_per_gpu"],
+                temperature=data["temperature"],
+            )
+
             policy_loss_config = safe_serialize(vars(self.actor_config.policy_loss))
 
             post_process_inputs = dict(actor_config=actor_config_as_dict, policy_loss_config=policy_loss_config, extra_inputs=extra_inputs)
@@ -787,6 +792,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             max_prompt_len=max_prompt_len,
             max_response_len=max_response_len,
             max_token_len_per_gpu=data["max_token_len_per_gpu"],
+            temperature=data["temperature"],
         )
 
         post_process_inputs = dict(extra_inputs=extra_inputs)
