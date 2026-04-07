@@ -179,42 +179,75 @@ class ArcticRLClientWrapper:
     def initialize(self, model_name: str):
         from arctic_training.arctic_rl import ArcticRLClient, ArcticRLClientConfig
 
-        config = ArcticRLClientConfig(
+        n_gpus = self.config.trainer.n_gpus_per_node
+        colocate = self.config.actor_rollout_ref.hybrid_engine
+        attn_implementation = self.config.actor_rollout_ref.model.override_config.get(
+            'attn_implementation', 'eager'
+        )
+
+        actor_cfg = self.config.actor_rollout_ref.actor
+        optim_cfg = actor_cfg.optim
+        data_cfg = self.config.data
+
+        micro_batch_size = actor_cfg.ppo_micro_batch_size_per_gpu or 1
+        train_batch_size = data_cfg.train_batch_size
+        grad_accum_steps = max(1, train_batch_size // (micro_batch_size * n_gpus))
+        seq_parallel_size = actor_cfg.fsdp_config.get("ulysses_sequence_parallel_size", 1)
+        max_length = data_cfg.max_prompt_length + data_cfg.max_response_length
+
+        rollout_cfg = self.config.actor_rollout_ref.rollout
+        vllm_config = {
+            "tensor_parallel_size": rollout_cfg.tensor_model_parallel_size,
+            "gpu_memory_utilization": rollout_cfg.gpu_memory_utilization,
+            "max_model_len": rollout_cfg.get("max_model_len") or max_length,
+            "max_num_seqs": rollout_cfg.max_num_seqs,
+            "enforce_eager": rollout_cfg.enforce_eager,
+            "enable_chunked_prefill": rollout_cfg.enable_chunked_prefill,
+        }
+        if rollout_cfg.get("quantization"):
+            vllm_config["quantization"] = rollout_cfg.quantization
+
+        rl_config = ArcticRLClientConfig(
             host="localhost",
             port=7000,
             backend="local",
-            # TODO: Grab GPU counts from VeRL config
-            training_gpus=1,
-            sample_gpus=1,
-            log_prob_gpus=1,
+            training_gpus=n_gpus,
+            sample_gpus=n_gpus,
+            log_prob_gpus=n_gpus,
+            colocate=colocate,
             log_prob_engine="deepspeed",
             model_name=model_name,
             ds_config={
-                "train_micro_batch_size_per_gpu": 1,
-                "train_batch_size": 1,
-                "gradient_accumulation_steps": 1,
-                "sequence_parallel_size": 1,
+                "train_micro_batch_size_per_gpu": micro_batch_size,
+                "train_batch_size": train_batch_size,
+                "gradient_accumulation_steps": grad_accum_steps,
+                "sequence_parallel_size": seq_parallel_size,
                 "zero_optimization": {"stage": 1},
             },
-            # TODO: Grab training config from VeRL config
             training_config={
-                "optimizer": {"lr": 0.0002, "weight_decay": 0.0, "betas": [0.9, 0.999]},
-                "lr_scheduler": {"warmup_ratio": 0.05},
-                "training_horizon": 10,
-                "max_length": 8096,
+                "optimizer": {
+                    "lr": optim_cfg.lr,
+                    "weight_decay": optim_cfg.weight_decay,
+                    "betas": list(optim_cfg.betas),
+                },
+                "lr_scheduler": {"warmup_ratio": optim_cfg.lr_warmup_steps_ratio},
+                "training_horizon": self.config.trainer.total_epochs,
+                "max_length": max_length,
                 "model_config": None,
-                "attn_implementation": "eager",
+                "attn_implementation": attn_implementation,
             },
-            vllm_config=None,
+            vllm_config=vllm_config,
         )
 
-        # Feels like a hack, but ArcticRLClient is constructed as a ray remote
-        # actor with num_gpus=0 - This causes CUDA_VISIBLE_DEVICES to be empty,
-        # so we need to set it manually.
-        num_gpus = config.training_gpus + config.sample_gpus + config.log_prob_gpus
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(num_gpus))
+        # ArcticRLClient is constructed as a ray remote actor with num_gpus=0,
+        # which causes CUDA_VISIBLE_DEVICES to be empty.
+        if colocate:
+            num_visible = n_gpus
+        else:
+            num_visible = rl_config.training_gpus + rl_config.sample_gpus + rl_config.log_prob_gpus
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(num_visible))
 
-        self._client = ArcticRLClient(config)
+        self._client = ArcticRLClient(rl_config)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
 
     # TODO: Just for debugging - remove later
@@ -248,29 +281,6 @@ class ArcticRLClientWrapper:
             entropy = torch.tensor(entropy)
         if log_probs is not None:
             log_probs = torch.tensor(log_probs)
-
-        # TODO: AI fix to resolve problems after merge into arl branch. Need to verify correctness of this.
-        # The model returns packed (1, total_nnz) tensors, but downstream
-        # rm_padding expects padded (bsz, max_seq_len). Unpack and re-pad.
-        if post_process_inputs is not None:
-            cu_seqlens = post_process_inputs["cu_seqlens"]
-            seq_lengths = cu_seqlens.diff()
-            bsz = seq_lengths.shape[0]
-            max_seq_len = int(seq_lengths.max())
-
-            def _packed_to_padded(t):
-                flat = t.reshape(-1)
-                padded = torch.zeros(bsz, max_seq_len, dtype=flat.dtype, device=flat.device)
-                for i in range(bsz):
-                    start = int(cu_seqlens[i])
-                    length = int(seq_lengths[i])
-                    padded[i, :length] = flat[start:start + length]
-                return padded
-
-            if entropy is not None:
-                entropy = _packed_to_padded(entropy)
-            if log_probs is not None:
-                log_probs = _packed_to_padded(log_probs)
 
         return entropy, log_probs
 
