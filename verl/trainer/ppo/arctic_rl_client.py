@@ -143,11 +143,11 @@ class ArcticRLClient4VeRL:
 
         dss_batch_dict.update(post_process_inputs=post_process_inputs)
 
-        #_ = self.training_engine.forward(**dss_batch_dict, post_process_inputs=post_process_inputs)
         _ = self.training_engine.forward(**dss_batch_dict)
         loss, metrics = self.training_engine.backward()
-        self.training_engine.step()
+        global_steps, last_lr = self.training_engine.step()
 
+        metrics.update({"global_steps": [global_steps], "last_lr": [last_lr]})
         print(f"arctic_rl_client.update_actor: {loss=}")
         print(f"arctic_rl_client.update_actor: {metrics=}")
         return loss.cpu().item(), metrics

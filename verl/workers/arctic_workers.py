@@ -165,23 +165,17 @@ def prepare_model_inputs_remove_padding(micro_batch: TensorDict):
     return model_inputs, output_args
 
 
-def prepare_extra_inputs(data: TensorDict, max_prompt_len: int, pad_to_prompt_len=True) -> dict:
-    pad_token_id = tu.get_non_tensor_data(data=data, key="pad_token_id", default=0)
-    tensors_to_pad = ["advantages", "ref_log_prob", "old_log_probs", "response_mask"]
-    if pad_to_prompt_len:
-        padded_tensors = {k: F.pad(data[k], pad=(max_prompt_len, 0), value=pad_token_id) for k in tensors_to_pad}
-    else:
-        padded_tensors = {k: data[k] for k in tensors_to_pad}
+def prepare_extra_inputs(data: TensorDict) -> dict:
     extra_inputs = dict(
         prompts=data["prompts"],
         responses=data["responses"],
         attention_mask=data["attention_mask"],
         max_token_len_per_gpu=data["max_token_len_per_gpu"],
         global_batch_size=data["global_batch_size"],
-        response_mask=padded_tensors["response_mask"],
-        old_log_probs=padded_tensors["old_log_probs"],
-        advantages=padded_tensors["advantages"],
-        ref_log_prob=padded_tensors["ref_log_prob"],
+        response_mask=data["response_mask"],
+        old_log_probs=data["old_log_probs"],
+        advantages=data["advantages"],
+        ref_log_prob=data["ref_log_prob"],
         rollout_is_weights=data.get("rollout_is_weights", None),
         batch_num_tokens=data["loss_mask"].sum(),
     )
@@ -201,28 +195,6 @@ def make_njt(data: TensorDict, tensor: Tensor) -> Tensor:
     tensor = torch.cat([t for t in tensor.unbind()])
     tensor = torch.nested.nested_tensor_from_jagged(tensor, cu_seqlens)
     return tensor
-
-def postprocess_log_prob_output(data: TensorDict, entropy: Tensor, log_probs: Tensor) -> TensorDict:
-    x_entropy = make_njt(data, entropy)
-    x_log_probs = make_njt(data, log_probs)
-
-    print(f"postprocess_log_prob_output: {x_entropy.shape=} {x_log_probs.shape=} {entropy.shape=} {log_probs.shape=}")
-
-    micro_entropy = [t.unsqueeze(0) for t in x_entropy.unbind()]
-    micro_log_probs = [t.unsqueeze(0) for t in x_log_probs.unbind()]
-    output_lst = []
-    for i in range(len(micro_entropy)):
-        model_output = {
-            "entropy": micro_entropy[i],
-            "log_probs": micro_log_probs[i],
-        }
-        output_lst.append({
-            "model_output": model_output,
-            "metrics": {},
-            "loss": 0.0,
-        })
-
-    return postprocess_batch_func(output_lst=output_lst, indices=None, data=data)
 
 
 def prepare_padded_dss_batch_dict(data: TensorDict, pad_token_id) -> dict:
@@ -544,13 +516,26 @@ class TrainingWorker(Worker, DistProfilerExtension):
             #actor_config_as_dict = safe_serialize(self.actor_config)
             actor_config_as_dict = safe_serialize(actor_config_as_dict)
 
-            extra_inputs = prepare_extra_inputs(data, max_prompt_len, pad_to_prompt_len=not self.use_zorro)
-            extra_inputs.update(
+            # TODO: move to init since globally constant
+            extra_inputs = dict(
                 rollout_n=rollout_n,
                 max_prompt_len=max_prompt_len,
                 max_response_len=max_response_len,
                 max_token_len_per_gpu=data["max_token_len_per_gpu"],
-                temperature=data["temperature"],
+                temperature=data["temperature"],              
+            )
+
+            extra_inputs.update(
+                prompts=data["prompts"],
+                responses=data["responses"],
+                attention_mask=data["attention_mask"],
+                global_batch_size=data["global_batch_size"],
+                response_mask=data["response_mask"],
+                old_log_probs=data["old_log_probs"],
+                advantages=data["advantages"],
+                ref_log_prob=data["ref_log_prob"],
+                rollout_is_weights=data.get("rollout_is_weights", None),
+                batch_num_tokens=data["loss_mask"].sum(),
             )
 
             policy_loss_config = safe_serialize(vars(self.actor_config.policy_loss))
@@ -574,13 +559,13 @@ class TrainingWorker(Worker, DistProfilerExtension):
             loss, metrics = ray.get(self.arctic_rl_client.update_actor.remote(dss_batch_dict, post_process_inputs))
             # output = ray.get(self.arctic_rl_client.update_actor.remote(dss_batch_dict, post_process_inputs))
             # print(f"update_actor: {loss=}")
-            # print(f"update_actor: {metrics=}")
+            print(f"update_actor: {metrics=}")
 
 
         from verl.utils.metric import AggregationType, Metric
         # XXX: fix me - we need to aggregate the metrics
         metrics = {k:Metric(value=v[0], aggregation=AggregationType.MEAN) for k,v in metrics.items()}
-
+        metrics["lr"] = metrics.pop("last_lr")
         delta_time = timer.last
 
         # XXX: fix me
@@ -596,10 +581,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         # print(f"{data=}")
         print(f"{data["input_ids"].shape=}")
-        model_output = {
-            # XXX: fix me - made a copy of existing same shape tensor for now
-            # 'log_probs': batch[0]["ref_log_prob"]
-        }
+        model_output = {}
 
         # expected output so far
         #
@@ -626,21 +608,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
             metrics=metrics,
             loss=loss,
         )
-
-        update_lr_scheduler = tu.get(data, key="update_lr_scheduler", default=False)
-        # XXX: fix me
-        update_lr_scheduler = False
-        # update lr scheduler
-        if update_lr_scheduler:
-            lr = self.engine.lr_scheduler_step()
-        else:
-            lr = None
-
-
-        # we don't need model_output in training. Maybe we change out mind later
-        #output.pop("model_output")
-        if lr is not None:
-            output["metrics"]["lr"] = lr
 
         final_output = self._postprocess_output(
             output,
@@ -717,18 +684,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
             self.actor.set_loss_fn(loss_fn=self.loss_fn)
 
             self.set_dispatch_collect(mesh_name="actor", **self.actor.get_dispatch_collect())
-
-            # from verl.workers.actor import DataParallelPPOActor
-
-            # # hacks to appease to DataParallelPPOActor
-            # import torch.distributed
-            # torch.distributed.get_rank = lambda: 0
-
-            # actor_cfg = omega_conf_to_dataclass(self.config.actor)
-            # self.actor = DataParallelPPOActor(
-            #     # XXX: hijack actor_module
-            #     config=actor_cfg, actor_module=None, actor_optimizer=None
-            # )
 
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
@@ -828,79 +783,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return self.compute_any_log_prob(data, self.arctic_rl_client.compute_ref_log_prob)
 
 
-    # TODO: Actor API Begin
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
     def compute_log_prob(self, data: TensorDict) -> TensorDict:
         return self.compute_any_log_prob(data, self.arctic_rl_client.compute_log_prob)
-
-
-    # @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
-    # @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
-    # def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
-    #     print(f"compute_ref_log_prob data: {data}")
-    #     # dss_batch_dict, output_args = prepare_model_inputs_remove_padding(data)
-    #     pad_token_id = tu.get_non_tensor_data(data=data, key="pad_token_id", default=0)
-    #     dss_batch_dict, max_prompt_len, max_response_len = prepare_padded_dss_batch_dict(data, pad_token_id)
-    #     # print(f"{dss_batch_dict=}")
-    #     # import pdb; pdb.set_trace()
-    #     # self.dss_training_engine.forward(**dss_batch_dict)
-    #     # loss = self.dss_training_engine.backward()
-    #     # print(f"loss: {loss}")
-    #     # import pdb; pdb.set_trace()
-    #     # log_prob = self._loaded_dump_data["full_log_prob"]
-
-    #     self._update_config_params(data)
-
-    #     rollout_n = self.actor_config.rollout_n
-    #     max_token_len_per_gpu = self.actor_config.ppo_max_token_len_per_gpu
-
-    #     extra_inputs = {}
-    #     extra_inputs["rollout_n"] = rollout_n
-    #     extra_inputs["max_prompt_len"] = max_prompt_len
-    #     extra_inputs["max_response_len"] = max_response_len
-
-    #     post_process_inputs  = dict(extra_inputs=extra_inputs)
-    #     entropy, log_probs = ray.get(self.arctic_rl_client.compute_ref_log_prob.remote(dss_batch_dict, post_process_inputs))
-
-    #     batch_output = postprocess_log_prob_output(data=data, entropy=entropy, log_probs=log_probs)
-    #     model_output = batch_output.pop("model_output", {})
-    #     metrics = {
-    #         "mfu": 0.0,
-    #         "loss": 1.0,
-    #     }
-    #     final_output = tu.get_tensordict(tensor_dict=model_output, non_tensor_dict={"metrics": metrics})
-
-    #     return final_output
-
-
-
-
-    # # TODO: Actor API Begin
-    # @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
-    # @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
-    # def compute_log_prob(self, data: TensorDict) -> TensorDict:
-
-    #     print(f"compute_log_prob data: {data}")
-    #     # dss_batch_dict, output_args = prepare_model_inputs_remove_padding(data)
-    #     pad_token_id = tu.get_non_tensor_data(data=data, key="pad_token_id", default=0)
-    #     dss_batch_dict = prepare_padded_dss_batch_dict(data, pad_token_id)
-
-    #     self._update_config_params(data)
-    #     post_process_inputs  = dict()
-    #     # print(f"compute_log_prob: {post_process_inputs=}")
-    #     entropy, log_probs = ray.get(self.arctic_rl_client.compute_log_prob.remote(dss_batch_dict, post_process_inputs))
-
-    #     # import pdb; pdb.set_trace()
-    #     batch_output = postprocess_log_prob_output(data=data, entropy=entropy, log_probs=log_probs)
-    #     model_output = batch_output.pop("model_output", {})
-    #     metrics = {
-    #         "mfu": 0.0,
-    #         "loss": 1.0,
-    #     }
-    #     final_output = tu.get_tensordict(tensor_dict=model_output, non_tensor_dict={"metrics": metrics})
-
-    #     return final_output
 
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
@@ -909,18 +795,20 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         output = self.actor.train_global_batch(data=data)
         return output.cpu() if output is not None else None
 
-
+    # TODO: Load Checkpoint API
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def load_checkpoint(self, local_path, hdfs_path=None, del_local_after_load=False):
         assert "actor" in self.role, "load_checkpoint only support actor role"
         return
 
 
+    # TODO: Save Checkpoint API
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         assert "actor" in self.role, "save_checkpoint only support actor role"
         return
 
+    # TODO: Update Weights API
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
     async def update_weights(self, global_steps: int = None):
         """Update weights from trainer to rollout.
@@ -932,10 +820,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         """
         return
 
-    # TODO: Actor API End
 
-
-    # TODO: Rollout API Begin
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
     async def generate_sequences(self, batch: DataProto):
         # print(f"{batch.non_tensor_batch=}")
@@ -955,7 +840,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         return gen_batch_output
         # return self._loaded_dump_data["gen_batch_output"]
 
-    # TODO: Rollout API End
 
     # TODO: CheckpointManager API Begin
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)

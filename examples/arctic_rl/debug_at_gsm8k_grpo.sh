@@ -2,7 +2,7 @@
 
 set -x
 # enable if HF hub misbehaves/times out (assuming you have already cached the models locally)
-# export HF_HUB_OFFLINE=1
+export HF_HUB_OFFLINE=1
 
 export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
