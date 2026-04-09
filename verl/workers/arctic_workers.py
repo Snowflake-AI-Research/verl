@@ -533,10 +533,12 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 response_mask=data["response_mask"],
                 old_log_probs=data["old_log_probs"],
                 advantages=data["advantages"],
-                ref_log_prob=data["ref_log_prob"],
                 rollout_is_weights=data.get("rollout_is_weights", None),
                 batch_num_tokens=data["loss_mask"].sum(),
             )
+
+            if self.actor_config.use_kl_loss:
+                extra_inputs["ref_log_prob"] = data["ref_log_prob"]
 
             policy_loss_config = safe_serialize(vars(self.actor_config.policy_loss))
 
@@ -819,27 +821,6 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         2. For async training with disaggregated trainer and rollout, send_weights only by checkpoint engine.
         """
         return
-
-
-    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="rollout"))
-    async def generate_sequences(self, batch: DataProto):
-        # print(f"{batch.non_tensor_batch=}")
-        raw_prompts = list(batch.non_tensor_batch["raw_prompt"])
-        # print(f"{raw_prompts=}")
-        prompts = self.tokenizer.apply_chat_template(
-            raw_prompts,
-            add_generation_prompt=True,
-            tokenize=False,
-        )
-        # import pdb; pdb.set_trace()
-        # print(f"prompts: {prompts}")
-        metrics = {}
-
-        gen_batch_output = self.arctic_inference_engine.generate(prompts=prompts)
-
-        return gen_batch_output
-        # return self._loaded_dump_data["gen_batch_output"]
-
 
     # TODO: CheckpointManager API Begin
     @register(dispatch_mode=Dispatch.ONE_TO_ALL, blocking=False)
