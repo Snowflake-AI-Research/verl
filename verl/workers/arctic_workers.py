@@ -385,49 +385,20 @@ class TrainingWorker(Worker, DistProfilerExtension):
         Returns:
 
         """
+        assert self.loss_fn is not None, "loss function can't be None when calling train_global_batch"
+
         disable_auto_offload = tu.pop(data, key="disable_auto_offload", default=False)
 
         self.engine_config = self.config.engine_config
 
-        with (
-            Timer(name="train_batch", logger=None),
-        ):
-            # update
-            global_token_num = data["input_ids"].offsets().diff().tolist()  # (total_nnz,)
-            tu.assign_non_tensor(
-                data,
-                global_token_num=NonTensorData(global_token_num),
-                update_lr_scheduler=True,
-                disable_auto_offload=disable_auto_offload,
-            )
-
-            actor_output = self.train_batch(data)
-
-            output_metrics = tu.get(actor_output, "metrics")
-
-            metrics = {}
-            for key, val in output_metrics.items():
-                # print(f"metrics {key=} {val=}")
-
-                # flattn dp and micro batch
-                if isinstance(val, list):
-                    output_metrics[key] = (
-                        Metric.aggregate_dp(val)
-                        if isinstance(val[0], Metric)
-                        else list(chain.from_iterable(val))
-                    )
-
-            append_to_dict(metrics, output_metrics)
-
-            output = tu.get_tensordict(tensor_dict={}, non_tensor_dict={"metrics": metrics}).cpu()
-
-        return output
-
-
-    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
-    def train_batch(self, data: TensorDict) -> TensorDict:
-        assert self.loss_fn is not None, "loss function can't be None when calling train_batch"
-
+        # update
+        global_token_num = data["input_ids"].offsets().diff().tolist()  # (total_nnz,)
+        tu.assign_non_tensor(
+            data,
+            global_token_num=NonTensorData(global_token_num),
+            update_lr_scheduler=True,
+            disable_auto_offload=disable_auto_offload,
+        )
 
         # global_token_num should be a list of number of tokens of each seq in this batch
         global_token_num = tu.get(data, key="global_token_num")
@@ -503,26 +474,13 @@ class TrainingWorker(Worker, DistProfilerExtension):
             print(f"{dss_batch_dict=}")
 
             rollout_n = self.actor_config.rollout_n
-            max_token_len_per_gpu = self.actor_config.ppo_max_token_len_per_gpu
-
-            # we need to serialize the config object to dict
-            # dataclasses.asdict only returns keys that are defined at init (vars will do more) - but perhaps we want `asdict`?
-            actor_config_as_dict = vars(self.actor_config)
-            print(f"update_actor: {self.actor_config=}")
-            print(f"update_actor: {actor_config_as_dict=}")
-            import json
-            def safe_serialize(obj):
-                return json.loads(json.dumps(obj, default=lambda o: None))
-            #actor_config_as_dict = safe_serialize(self.actor_config)
-            actor_config_as_dict = safe_serialize(actor_config_as_dict)
-
             # TODO: move to init since globally constant
             extra_inputs = dict(
                 rollout_n=rollout_n,
                 max_prompt_len=max_prompt_len,
                 max_response_len=max_response_len,
                 max_token_len_per_gpu=data["max_token_len_per_gpu"],
-                temperature=data["temperature"],              
+                temperature=data["temperature"],
             )
 
             extra_inputs.update(
@@ -539,24 +497,20 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
             if self.actor_config.use_kl_loss:
                 extra_inputs["ref_log_prob"] = data["ref_log_prob"]
+            # we need to serialize the config object to dict
+            # dataclasses.asdict only returns keys that are defined at init (vars will do more) - but perhaps we want `asdict`?
+            actor_config_as_dict = vars(self.actor_config)
+            print(f"update_actor: {self.actor_config=}")
+            print(f"update_actor: {actor_config_as_dict=}")
+            import json
+            def safe_serialize(obj):
+                return json.loads(json.dumps(obj, default=lambda o: None))
+            actor_config_as_dict = safe_serialize(actor_config_as_dict)
 
             policy_loss_config = safe_serialize(vars(self.actor_config.policy_loss))
 
             post_process_inputs = dict(actor_config=actor_config_as_dict, policy_loss_config=policy_loss_config, extra_inputs=extra_inputs)
             # print(f"update_actor: {post_process_inputs=}")
-
-            # XXX: pass the original batch as post_process_inputs["batch"] - the ppo loss function expects data["prompts"]
-            # it got stripped and is not in dss_batch_dict
-#   File "/code/users/stas/github/sf/dss-platform/dss/processors/verl.py", line 90, in fwd_post_process_ppo_loss
-#     return ppo_loss(config, model_output, data)
-#            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-#   File "/code/users/stas/github/sf/dss-platform/dss/processors/verl.py", line 100, in ppo_loss
-#     log_prob = no_padding_2_padding(model_output["log_probs"], data)
-#                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-#   File "/code/users/stas/github/sf/arctic-verl/verl/workers/utils/padding.py", line 99, in no_padding_2_padding
-#     prompt_ids = data["prompts"]
-#                  ~~~~^^^^^^^^^^^
-# KeyError: 'prompts'
 
             loss, metrics = ray.get(self.arctic_rl_client.update_actor.remote(dss_batch_dict, post_process_inputs))
             # output = ray.get(self.arctic_rl_client.update_actor.remote(dss_batch_dict, post_process_inputs))
@@ -583,7 +537,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         # print(f"{data=}")
         print(f"{data["input_ids"].shape=}")
-        model_output = {}
 
         # expected output so far
         #
@@ -603,15 +556,14 @@ class TrainingWorker(Worker, DistProfilerExtension):
         #   }
         # }
 
-
-        #output = tu.get_tensordict(tensor_dict=model_output, non_tensor_dict=non_tensor_dict)
+        model_output = {}
         output = dict(
             model_output=model_output,
             metrics=metrics,
             loss=loss,
         )
 
-        final_output = self._postprocess_output(
+        actor_output = self._postprocess_output(
             output,
             global_token_num=global_token_num,
             delta_time=delta_time,
@@ -619,10 +571,25 @@ class TrainingWorker(Worker, DistProfilerExtension):
             images_seqlens=images_seqlens,
         ).cpu()
 
-        return final_output
+        output_metrics = tu.get(actor_output, "metrics")
 
+        metrics = {}
+        for key, val in output_metrics.items():
+            # print(f"metrics {key=} {val=}")
 
+            # flattn dp and micro batch
+            if isinstance(val, list):
+                output_metrics[key] = (
+                    Metric.aggregate_dp(val)
+                    if isinstance(val[0], Metric)
+                    else list(chain.from_iterable(val))
+                )
 
+        append_to_dict(metrics, output_metrics)
+
+        output = tu.get_tensordict(tensor_dict={}, non_tensor_dict={"metrics": metrics}).cpu()
+
+        return output
 
 
 
