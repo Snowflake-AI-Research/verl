@@ -1,41 +1,41 @@
 #!/bin/bash
 
 set -x
-# enable if HF hub misbehaves/times out (assuming you have already cached the models locally)
-export HF_HUB_OFFLINE=1
 
 export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
 export RAY_DEDUP_LOGS=0
+export HF_HUB_OFFLINE=1
+export USE_ARCTIC_ZORRO=0
+
 # we want to make sure this runs on non-gpu client
 export CUDA_VISIBLE_DEVICES=
-
-export USE_ARCTIC_ZORRO=1
 
 # BSZ=1024
 BSZ=2
 MBS=2
 UBS=2
-ROLL_N=4
+ROLL_N=2
 MAX_STEPS=4
-# LR=0
-LR=1e-6
-LOGGER=console
-# LOGGER="['console','wandb']"
+LR=0
+# LR=1e-6
+# LOGGER=console
+LOGGER="['console','wandb']"
 USE_KL_LOSS=True
 # USE_KL_LOSS=False
-REMOVE_PADDING=True
-# REMOVE_PADDING=False
+# REMOVE_PADDING=True
+REMOVE_PADDING=False
 MODEL="Qwen/Qwen3-0.6B"
 # STRATEGY="fsdp"
 STRATEGY="fsdp2"
 PYTHONUNBUFFERED=1
 HYDRA_FULL_ERROR=1
 USE_LEGACY_WORKER_IMPL=disable
-USE_ARCTIC_RL=True
 NGPU_PER_NODE=1
 ROLLOUT_NAME=arctic # entry point into ArcticRL
-experiment_name="qwen3-0.6B_ngpu${NGPU_PER_NODE}_gbs${BSZ}_rolln${ROLL_N}_at${USE_ARCTIC_RL}"
+USE_ARCTIC_RL=True
+
+experiment_name="qwen3-0.6B_ngpu${NGPU_PER_NODE}_gbs${BSZ}_rolln${ROLL_N}_zorro${USE_ARCTIC_ZORRO}"
 
 gpu_name=$(nvidia-smi --query-gpu=gpu_name  --format=csv,noheader -i 0)
 if [[ $gpu_name == *"H200"* ]]; then
@@ -54,10 +54,12 @@ python3 -m verl.trainer.main_ppo \
     data.val_files=/code/shared/gsm8k/test.parquet \
     data.train_batch_size=${BSZ} \
     data.max_prompt_length=64 \
-    data.max_response_length=16 \
+    data.max_response_length=512 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.shuffle=False \
+    +data.seed=42 \
+    actor_rollout_ref.actor.data_loader_seed=42 \
     reward.num_workers=1 \
     actor_rollout_ref.rollout.agent.num_workers=1 \
     actor_rollout_ref.model.path=${MODEL} \

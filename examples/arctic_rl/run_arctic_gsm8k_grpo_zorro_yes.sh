@@ -54,7 +54,7 @@ python3 -m verl.trainer.main_ppo \
     data.val_files=/code/shared/gsm8k/test.parquet \
     data.train_batch_size=${BSZ} \
     data.max_prompt_length=64 \
-    data.max_response_length=96 \
+    data.max_response_length=512 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.shuffle=False \
