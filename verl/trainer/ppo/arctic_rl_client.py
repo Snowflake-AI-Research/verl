@@ -180,6 +180,7 @@ class ArcticRLClientWrapper:
         from arctic_training.arctic_rl import ArcticRLClient, ArcticRLClientConfig
 
         n_gpus = self.config.trainer.n_gpus_per_node
+        #n_gpus = 2
         colocate = self.config.actor_rollout_ref.hybrid_engine
         attn_implementation = self.config.actor_rollout_ref.model.override_config.get(
             'attn_implementation', 'eager'
@@ -267,27 +268,39 @@ class ArcticRLClientWrapper:
         return self.compute_log_prob(dss_batch_dict, post_process_inputs)
 
     def compute_log_prob(self, dss_batch_dict: dict, post_process_inputs: dict = None):
+        print(f"[ArcticRLWrapper] compute_log_prob INPUT: "
+              f"{{{', '.join(f'{k}: {v.shape}' for k, v in dss_batch_dict.items() if isinstance(v, torch.Tensor))}}}")
         batch = {
             "kwargs": dss_batch_dict,
-            "context": {"labels": dss_batch_dict["labels"]},
+            "context": {"input_ids": dss_batch_dict["input_ids"]},
+            "processing": {
+                "post": ["compute_logprobs"],
+                "loss_fn": None,
+            },
         }
-        result = self._client.fwd_no_grad(batch, post_processors=["entropy_logprobs"])
+        result = self._client.fwd_no_grad(batch)
         outputs = result.get("model_outputs", result)
 
-        entropy = outputs.get("entropy")
-        log_probs = outputs.get("log_probs")
-
-        if entropy is not None:
-            entropy = torch.tensor(entropy)
-        if log_probs is not None:
+        log_probs = outputs.get("logprobs")
+        if log_probs is not None and not isinstance(log_probs, torch.Tensor):
             log_probs = torch.tensor(log_probs)
 
+        # The pipeline doesn't return true entropy; approximate as
+        # -logprobs to match what grpo_loss uses internally (grpo.py:249).
+        entropy = -log_probs if log_probs is not None else None
+
+        print(f"[ArcticRLWrapper] compute_log_prob OUTPUT: "
+              f"entropy={entropy.shape if entropy is not None else None} "
+              f"log_probs={log_probs.shape if log_probs is not None else None}")
         return entropy, log_probs
 
     def update_actor(self, dss_batch_dict: dict, post_process_inputs: dict):
-        # TODO: Does this align with the ArcticRLClient4VeRL + dss-platform:verl_integration branch?
         extra = post_process_inputs.get("extra_inputs", {})
         seq_len = dss_batch_dict["input_ids"].shape[-1]
+
+        print(f"[ArcticRLWrapper] update_actor INPUT: "
+              f"{{{', '.join(f'{k}: {v.shape}' for k, v in dss_batch_dict.items() if isinstance(v, torch.Tensor))}}} "
+              f"| extra: {{{', '.join(f'{k}: {v.shape}' for k, v in extra.items() if isinstance(v, torch.Tensor))}}}")
 
         def _left_pad(t: torch.Tensor) -> torch.Tensor:
             """Left-pad a response-only tensor to full sequence length with zeros."""
@@ -298,21 +311,23 @@ class ArcticRLClientWrapper:
             return torch.cat([pad, t], dim=-1)
 
         context = {
-            "labels": dss_batch_dict["labels"],
-            "old_logprobs": _left_pad(extra["old_log_probs"]),
+            "input_ids": dss_batch_dict["input_ids"],
+            "old_log_probs_shifted": _left_pad(extra["old_log_probs"]),
             "advantages": _left_pad(extra["advantages"]),
             "loss_mask": _left_pad(extra["response_mask"]),
         }
+        print(f"[ArcticRLWrapper] update_actor CONTEXT: "
+              f"{{{', '.join(f'{k}: {v.shape}' for k, v in context.items() if isinstance(v, torch.Tensor))}}}")
         batch = {"kwargs": dss_batch_dict, "context": context}
 
-        result = self._client.fwd_bwd(batch, loss_fn="grpo")
+        result = self._client.fwd_bwd(batch, processing={"loss_fn": "grpo", "post": ["compute_logprobs"]})
         self._client.step()
 
         loss = result.get("avg_loss", 0.0)
         raw_metrics = result.get("post_process_outputs", {})
-        # Caller expects metrics values to be lists (does v[0])
         metrics = {k: v if isinstance(v, list) else [v] for k, v in raw_metrics.items()}
 
+        print(f"[ArcticRLWrapper] update_actor OUTPUT: loss={loss} metrics={metrics}")
         return loss, metrics
 
     def destroy(self):
