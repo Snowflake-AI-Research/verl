@@ -12,6 +12,7 @@ from dss_client.client import DSSInferenceClient, DSSTrainingClient
 from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer
 from deepspeed.utils import OnDevice
 from verl.utils import tensordict_utils as tu
+from verl.utils import hf_tokenizer
 import os
 import ray
 from verl.utils.config import omega_conf_to_dataclass
@@ -239,6 +240,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         self.arctic_rl_client = arctic_rl_client
         self.tokenizer = tokenizer
+        self.pad_token_id = self.tokenizer.pad_token_id
 
         self.model_config = self.config.model_config
         self.engine_config = self.config.engine_config
@@ -437,10 +439,9 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
             from verl.workers.utils.padding import no_padding_2_padding_prompt_response
             # XXX: move to init
-            if self.tokenizer.pad_token_id is None:
-                self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+  
 
-            input_ids, max_prompt_len, max_response_len = no_padding_2_padding_prompt_response(tensor=input_ids, data=data, pad_token_id=self.tokenizer.pad_token_id)
+            input_ids, max_prompt_len, max_response_len = no_padding_2_padding_prompt_response(tensor=input_ids, data=data, pad_token_id=self.pad_token_id)
             # XXX: 0 pad on pos ids is odd, check the original - perhaps need to re-build pos ids?
             position_ids, _, _= no_padding_2_padding_prompt_response(tensor=position_ids, data=data, pad_token_id=0)
             print(f"{input_ids.shape=}")
@@ -643,8 +644,11 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
                 assert self.config.rollout.log_prob_micro_batch_size_per_gpu is not None
                 assert self.config.actor.ppo_micro_batch_size_per_gpu is not None
 
-            # XXX: fix me - duplicated in _init_engines and model hardcoded
-            self.tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-0.6B")
+            trust_remote_code=self.config.model.get("trust_remote_code", False)
+            self.tokenizer = hf_tokenizer(self.config.model.path, trust_remote_code=trust_remote_code)
+            if self.tokenizer.pad_token_id is None:
+                self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+            self.pad_token_id = self.tokenizer.pad_token_id
             self.actor = TrainingWorker(config=actor_training_config, actor_config=actor_config, arctic_rl_client=self.arctic_rl_client, tokenizer=self.tokenizer )
 
             self.actor.reset()
@@ -694,8 +698,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     def compute_any_log_prob(self, data: TensorDict, compute_log_prob_fn) -> TensorDict:
         print(f"compute_ref_log_prob data: {data}")
-        pad_token_id = tu.get_non_tensor_data(data=data, key="pad_token_id", default=0)
-        batch, max_prompt_len, max_response_len = prepare_padded_dss_batch_dict(data, pad_token_id)
+        batch, max_prompt_len, max_response_len = prepare_padded_dss_batch_dict(data, self.pad_token_id)
 
         self._update_config_params(data)
 

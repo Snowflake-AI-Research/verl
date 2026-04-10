@@ -6,7 +6,7 @@ export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
 export RAY_DEDUP_LOGS=0
 export HF_HUB_OFFLINE=1
-# export USE_ARCTIC_ZORRO=1
+export USE_ARCTIC_ZORRO=1
 
 # we want to make sure this runs on non-gpu client
 export CUDA_VISIBLE_DEVICES=
@@ -17,8 +17,8 @@ MBS=2
 UBS=2
 ROLL_N=2
 MAX_STEPS=4
-# LR=0
-LR=1e-6
+LR=0
+# LR=1e-6
 # LOGGER=console
 LOGGER="['console','wandb']"
 USE_KL_LOSS=True
@@ -35,7 +35,7 @@ NGPU_PER_NODE=1
 ROLLOUT_NAME=arctic # entry point into ArcticRL
 USE_ARCTIC_RL=True
 
-experiment_name="qwen3-0.6B_ngpu${NGPU_PER_NODE}_gbs${BSZ}_rolln${ROLL_N}_at${USE_ARCTIC_RL}"
+experiment_name="qwen3-0.6B_ngpu${NGPU_PER_NODE}_gbs${BSZ}_rolln${ROLL_N}_zorro${USE_ARCTIC_ZORRO}"
 
 gpu_name=$(nvidia-smi --query-gpu=gpu_name  --format=csv,noheader -i 0)
 if [[ $gpu_name == *"H200"* ]]; then
@@ -59,7 +59,7 @@ python3 -m verl.trainer.main_ppo \
     data.truncation='error' \
     data.shuffle=False \
     +data.seed=42 \
-    +actor_rollout_ref.actor.data_loader_seed=42 \
+    actor_rollout_ref.actor.data_loader_seed=42 \
     reward.num_workers=1 \
     actor_rollout_ref.rollout.agent.num_workers=1 \
     actor_rollout_ref.model.path=${MODEL} \

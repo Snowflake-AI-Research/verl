@@ -11,8 +11,8 @@ MBS=2
 UBS=2
 ROLL_N=2
 MAX_STEPS=4
-# LR=0 
-LR=1e-6
+LR=0 
+# LR=1e-6
 # LOGGER=console
 LOGGER="['console','wandb']"
 USE_KL_LOSS=True
@@ -28,7 +28,7 @@ USE_LEGACY_WORKER_IMPL=disable
 NGPU_PER_NODE=1
 ROLLOUT_NAME=vllm
 
-experiment_name="qwen3-0.6B_ngpu${NGPU_PER_NODE}_gbs${BSZ}_rolln${ROLL_N}"
+experiment_name="qwen3-0.6B_ngpu${NGPU_PER_NODE}_gbs${BSZ}_rolln${ROLL_N}_baseline"
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
@@ -41,7 +41,7 @@ python3 -m verl.trainer.main_ppo \
     data.truncation='error' \
     data.shuffle=False \
     +data.seed=42 \
-    +actor_rollout_ref.actor.data_loader_seed=42 \
+    actor_rollout_ref.actor.data_loader_seed=42 \
     reward.num_workers=1 \
     actor_rollout_ref.rollout.agent.num_workers=1 \
     actor_rollout_ref.model.path=${MODEL} \
