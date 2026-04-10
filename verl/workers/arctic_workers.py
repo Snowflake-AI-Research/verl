@@ -431,7 +431,6 @@ class TrainingWorker(Worker, DistProfilerExtension):
             print(f"update_actor data: {data}")
 
             # XXX: fix me
-            padding_token = 100
             input_ids = data['input_ids']
             position_ids = data['position_ids']
             #input_ids = input_ids.unbind()
@@ -464,39 +463,35 @@ class TrainingWorker(Worker, DistProfilerExtension):
             #print(f"{output_args=}")
             #import pdb; pdb.set_trace()
 
-            dss_batch_dict = dict(
+            batch = dict(
                 input_ids=input_ids,
                 position_ids=position_ids,
                 attention_mask=data['attention_mask'],
                 labels=input_ids,
-                use_zorro=self.use_zorro,
+                prompts=data["prompts"],
+                responses=data["responses"],
+                response_mask=data["response_mask"],
+                old_log_probs=data["old_log_probs"],
+                advantages=data["advantages"],
             )
-            print(f"{dss_batch_dict=}")
+            if self.actor_config.use_kl_loss:
+                batch["ref_log_prob"] = data["ref_log_prob"]
 
-            rollout_n = self.actor_config.rollout_n
+            print(f"{batch=}")
+
             # TODO: move to init since globally constant
-            extra_inputs = dict(
-                rollout_n=rollout_n,
+            meta = dict(
+                rollout_n=self.actor_config.rollout_n,
                 max_prompt_len=max_prompt_len,
                 max_response_len=max_response_len,
                 max_token_len_per_gpu=data["max_token_len_per_gpu"],
                 temperature=data["temperature"],
-            )
-
-            extra_inputs.update(
-                prompts=data["prompts"],
-                responses=data["responses"],
-                attention_mask=data["attention_mask"],
+                use_zorro=self.use_zorro,
                 global_batch_size=data["global_batch_size"],
-                response_mask=data["response_mask"],
-                old_log_probs=data["old_log_probs"],
-                advantages=data["advantages"],
                 rollout_is_weights=data.get("rollout_is_weights", None),
                 batch_num_tokens=data["loss_mask"].sum(),
             )
 
-            if self.actor_config.use_kl_loss:
-                extra_inputs["ref_log_prob"] = data["ref_log_prob"]
             # we need to serialize the config object to dict
             # dataclasses.asdict only returns keys that are defined at init (vars will do more) - but perhaps we want `asdict`?
             actor_config_as_dict = vars(self.actor_config)
@@ -509,12 +504,16 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
             policy_loss_config = safe_serialize(vars(self.actor_config.policy_loss))
 
-            post_process_inputs = dict(actor_config=actor_config_as_dict, policy_loss_config=policy_loss_config, extra_inputs=extra_inputs)
+            meta.update(dict(actor_config=actor_config_as_dict, policy_loss_config=policy_loss_config))
             # print(f"update_actor: {post_process_inputs=}")
 
-            loss, metrics = ray.get(self.arctic_rl_client.update_actor.remote(dss_batch_dict, post_process_inputs))
+
+            payload = dict(batch=batch, meta=meta)
+            response = ray.get(self.arctic_rl_client.update_actor.remote(payload))
             # output = ray.get(self.arctic_rl_client.update_actor.remote(dss_batch_dict, post_process_inputs))
             # print(f"update_actor: {loss=}")
+            metrics = response['metrics']
+            loss = metrics.pop("loss")
             print(f"update_actor: {metrics=}")
 
 
@@ -695,52 +694,43 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
     def compute_any_log_prob(self, data: TensorDict, compute_log_prob_fn) -> TensorDict:
         print(f"compute_ref_log_prob data: {data}")
-        # dss_batch_dict, output_args = prepare_model_inputs_remove_padding(data)
         pad_token_id = tu.get_non_tensor_data(data=data, key="pad_token_id", default=0)
-        dss_batch_dict, max_prompt_len, max_response_len = prepare_padded_dss_batch_dict(data, pad_token_id)
-        # print(f"{dss_batch_dict=}")
-        # import pdb; pdb.set_trace()
-        # self.dss_training_engine.forward(**dss_batch_dict)
-        # loss = self.dss_training_engine.backward()
-        # print(f"loss: {loss}")
-        # import pdb; pdb.set_trace()
-        # log_prob = self._loaded_dump_data["full_log_prob"]
+        batch, max_prompt_len, max_response_len = prepare_padded_dss_batch_dict(data, pad_token_id)
 
         self._update_config_params(data)
 
-        rollout_n = self.actor_config.rollout_n
         #max_token_len_per_gpu = self.actor_config.ppo_max_token_len_per_gpu
 
-        extra_inputs = dict(
-            rollout_n=rollout_n,
+        meta = dict(
+            rollout_n=self.actor_config.rollout_n,
             max_prompt_len=max_prompt_len,
             max_response_len=max_response_len,
             max_token_len_per_gpu=data["max_token_len_per_gpu"],
             temperature=data["temperature"],
         )
 
-        post_process_inputs = dict(extra_inputs=extra_inputs)
-        entropy, log_probs = ray.get(compute_log_prob_fn.remote(dss_batch_dict, post_process_inputs))
+        payload = dict(batch=batch, meta=meta)
 
-        print(f"compute_any_log_prob: {entropy.shape=} {log_probs.shape=}")
+        response = ray.get(compute_log_prob_fn.remote(payload))
+
+        print(f"compute_any_log_prob: {response['batch']['entropy'].shape=} {response['batch']['log_probs'].shape=}")
 
         #batch_output = postprocess_log_prob_output(data=data, entropy=entropy, log_probs=log_probs)
         #model_output = batch_output.pop("model_output", {})
 
         # verl wants a full [bs, max_prompt_len+max_response_len] tensors and jagged
-        entropy = prepand_max_prompt_len_zeros(entropy, max_prompt_len)
-        log_probs = prepand_max_prompt_len_zeros(log_probs, max_prompt_len)
+        entropy = prepand_max_prompt_len_zeros(response['batch']['entropy'], max_prompt_len)
+        log_probs = prepand_max_prompt_len_zeros(response['batch']['log_probs'], max_prompt_len)
         print(f"compute_any_log_prob: {entropy.shape=} {log_probs.shape=}")
         entropy = make_njt(data, entropy)
         log_probs = make_njt(data, log_probs)
         print(f"compute_any_log_prob: {entropy.shape=} {log_probs.shape=}")
 
         model_output = dict(entropy=entropy, log_probs=log_probs)
+        metrics = response['metrics']
+        # TODO: fix me - mfu is not computed here
+        metrics["mfu"] = 0.0
 
-        metrics = {
-            "mfu": 0.0,
-            "loss": 1.0,
-        }
         final_output = tu.get_tensordict(tensor_dict=model_output, non_tensor_dict={"metrics": metrics})
 
         return final_output

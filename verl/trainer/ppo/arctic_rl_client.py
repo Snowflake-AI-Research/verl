@@ -30,6 +30,7 @@ def create_meta_model(name_or_path: str):
         meta_model = AutoModelForCausalLM.from_config(model_config)
     return meta_model
 
+
 class ArcticRLClient4VeRL:
     def __init__(self, config):
         """
@@ -109,48 +110,48 @@ class ArcticRLClient4VeRL:
             sampling_params=sampling_params,
         )
 
+
     # TODO: this should use the reference engine instead of the training engine
-    def compute_ref_log_prob(self, dss_batch_dict: dict, post_process_inputs: dict):
-        dss_batch_dict.update(post_process_inputs=post_process_inputs)
-        entropy, log_probs = self.training_engine.fwd_no_grad(**dss_batch_dict)
-        if entropy is not None:
-            entropy = torch.tensor(entropy).squeeze()
-        if log_probs is not None:
-            log_probs = torch.tensor(log_probs).squeeze()
-        print(f"arctic_rl_client.compute_ref_log_prob: {entropy.shape=}, {log_probs.shape=}")
-        return entropy, log_probs
+    def compute_ref_log_prob(self, payload: dict):
+        response = self.training_engine.fwd_no_grad(**payload)
+        # if entropy is not None:
+        #     entropy = torch.tensor(entropy).squeeze()
+        # if log_probs is not None:
+        #     log_probs = torch.tensor(log_probs).squeeze()
+        print(f"arctic_rl_client.compute_ref_log_prob: {response['batch']['entropy'].shape=}, {response['batch']['log_probs'].shape=}")
+        return response
     
 
-    def compute_log_prob(self, dss_batch_dict: dict, post_process_inputs: dict):
-        dss_batch_dict.update(post_process_inputs=post_process_inputs)
-
+    def compute_log_prob(self, payload: dict):
         # XXX: somehow we need to differentiate which model is this called on ref vs actor - at the moment it's always actor hardcoded
-        entropy, log_probs = self.training_engine.fwd_no_grad(**dss_batch_dict)
+        response = self.training_engine.fwd_no_grad(**payload)
 
         # XXX: for some reason no_padding_2_padding expects a 1D tensor - not sure how it'll work for
         # bs>1
         # I think it may have to do with tensor.is_nested - different path/logic
         # so most likely we need to convert these 2 into TensorDict
-        if entropy is not None:
-            entropy = torch.tensor(entropy).squeeze()
-        if log_probs is not None:
-            log_probs = torch.tensor(log_probs).squeeze()
-        print(f"arctic_rl_client.compute_log_prob: {entropy.shape=}, {log_probs.shape=}")
-        return entropy, log_probs
+        # if entropy is not None:
+        #     entropy = torch.tensor(entropy).squeeze()
+        # if log_probs is not None:
+        #     log_probs = torch.tensor(log_probs).squeeze()
+        print(f"arctic_rl_client.compute_log_prob: {response['batch']['entropy'].shape=}, {response['batch']['log_probs'].shape=}")
+        return response
 
 
-    def update_actor(self, dss_batch_dict: dict, post_process_inputs: dict):
+    def update_actor(self, payload: dict):
+        _ = self.training_engine.forward(**payload)
+        bwd_response = self.training_engine.backward()
+        step_response = self.training_engine.step()
 
-        dss_batch_dict.update(post_process_inputs=post_process_inputs)
+        step_response["metrics"].update(**bwd_response["metrics"])
 
-        _ = self.training_engine.forward(**dss_batch_dict)
-        loss, metrics = self.training_engine.backward()
-        global_steps, last_lr = self.training_engine.step()
+        # metrics.update({"global_steps": [global_steps], "last_lr": [last_lr]})
 
-        metrics.update({"global_steps": [global_steps], "last_lr": [last_lr]})
-        print(f"arctic_rl_client.update_actor: {loss=}")
-        print(f"arctic_rl_client.update_actor: {metrics=}")
-        return loss.cpu().item(), metrics
+        # print(f"arctic_rl_client.update_actor: {loss=}")
+        # print(f"arctic_rl_client.update_actor: {metrics=}")
+        # return loss.cpu().item(), metrics
+
+        return step_response
 
     def destroy(self):
         self.training_engine.destroy()
