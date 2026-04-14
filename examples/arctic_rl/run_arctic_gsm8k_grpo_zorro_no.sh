@@ -12,17 +12,28 @@ export USE_ARCTIC_ZORRO=0
 export CUDA_VISIBLE_DEVICES=
 
 # BSZ=1024
-BSZ=2
-MBS=2
+# MBS=256
+# UBS=32
+# ROLL_N=5
+# MAX_STEPS=100
+# PROMPT_LENGTH=512
+# RESPONSE_LENGTH=1024
+
+BSZ=8
+MBS=4
 UBS=2
 ROLL_N=2
 MAX_STEPS=4
-LR=0
-# LR=1e-6
-# LOGGER=console
-LOGGER="['console','wandb']"
-USE_KL_LOSS=True
-# USE_KL_LOSS=False
+PROMPT_LENGTH=64
+RESPONSE_LENGTH=512
+
+# LR=0
+LR=1e-6
+
+LOGGER=console
+# LOGGER="['console','wandb']"
+# USE_KL_LOSS=True
+USE_KL_LOSS=False
 # REMOVE_PADDING=True
 REMOVE_PADDING=False
 MODEL="Qwen/Qwen3-0.6B"
@@ -34,7 +45,8 @@ USE_LEGACY_WORKER_IMPL=disable
 NGPU_PER_NODE=1
 ROLLOUT_NAME=arctic # entry point into ArcticRL
 USE_ARCTIC_RL=True
-
+# COLOCATE=True
+COLOCATE=False
 experiment_name="qwen3-0.6B_ngpu${NGPU_PER_NODE}_gbs${BSZ}_rolln${ROLL_N}_zorro${USE_ARCTIC_ZORRO}"
 
 gpu_name=$(nvidia-smi --query-gpu=gpu_name  --format=csv,noheader -i 0)
@@ -53,8 +65,8 @@ python3 -m verl.trainer.main_ppo \
     data.train_files=/code/shared/gsm8k/train.parquet \
     data.val_files=/code/shared/gsm8k/test.parquet \
     data.train_batch_size=${BSZ} \
-    data.max_prompt_length=64 \
-    data.max_response_length=512 \
+    data.max_prompt_length=${PROMPT_LENGTH} \
+    data.max_response_length=${RESPONSE_LENGTH} \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.shuffle=False \
@@ -88,6 +100,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.use_kl_in_reward=False \
     trainer.use_legacy_worker_impl=${USE_LEGACY_WORKER_IMPL} \
     trainer.use_arctic_rl=${USE_ARCTIC_RL} \
+    arctic_rl.colocate=${COLOCATE} \
     trainer.critic_warmup=0 \
     trainer.logger=${LOGGER} \
     trainer.experiment_name=${experiment_name} \

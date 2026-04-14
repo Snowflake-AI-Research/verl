@@ -166,23 +166,6 @@ def prepare_model_inputs_remove_padding(micro_batch: TensorDict):
     return model_inputs, output_args
 
 
-def prepare_extra_inputs(data: TensorDict) -> dict:
-    extra_inputs = dict(
-        prompts=data["prompts"],
-        responses=data["responses"],
-        attention_mask=data["attention_mask"],
-        max_token_len_per_gpu=data["max_token_len_per_gpu"],
-        global_batch_size=data["global_batch_size"],
-        response_mask=data["response_mask"],
-        old_log_probs=data["old_log_probs"],
-        advantages=data["advantages"],
-        ref_log_prob=data["ref_log_prob"],
-        rollout_is_weights=data.get("rollout_is_weights", None),
-        batch_num_tokens=data["loss_mask"].sum(),
-    )
-
-    return extra_inputs
-
 def prepand_max_prompt_len_zeros(tensor: Tensor, max_prompt_len):
     prepand = torch.zeros([tensor.shape[0], max_prompt_len],  dtype=torch.int64, device=tensor.device)
     return torch.cat([prepand, tensor], dim=1)
@@ -430,7 +413,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
             # from verl.utils.tensordict_utils import chunk_tensordict
             # batch = chunk_tensordict(data, 1)
-            print(f"update_actor data: {data}")
+            # print(f"update_actor data: {data}")
 
             # XXX: fix me
             input_ids = data['input_ids']
@@ -478,7 +461,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             if self.actor_config.use_kl_loss:
                 batch["ref_log_prob"] = data["ref_log_prob"]
 
-            print(f"{batch=}")
+            # print(f"{batch=}")
 
             # TODO: move to init since globally constant
             meta = dict(
@@ -520,7 +503,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         from verl.utils.metric import AggregationType, Metric
         # XXX: fix me - we need to aggregate the metrics
-        metrics = {k:Metric(value=v[0], aggregation=AggregationType.MEAN) for k,v in metrics.items()}
+        metrics = {k:Metric(value=v[0] if isinstance(v, list) else v, aggregation=AggregationType.MEAN) for k,v in metrics.items()}
         metrics["lr"] = metrics.pop("last_lr")
         delta_time = timer.last
 
@@ -697,7 +680,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
 
     def compute_any_log_prob(self, data: TensorDict, compute_log_prob_fn) -> TensorDict:
-        print(f"compute_ref_log_prob data: {data}")
+        # print(f"compute_ref_log_prob data: {data}")
         batch, max_prompt_len, max_response_len = prepare_padded_dss_batch_dict(data, self.pad_token_id)
 
         self._update_config_params(data)
@@ -768,6 +751,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def save_checkpoint(self, local_path, hdfs_path=None, global_step=0, max_ckpt_to_keep=None):
         assert "actor" in self.role, "save_checkpoint only support actor role"
+        ray.get(self.arctic_rl_client.save_checkpoint.remote())
         return
 
     # TODO: Update Weights API
@@ -780,6 +764,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
            - after update_weights: rollout should be in wake_up mode.
         2. For async training with disaggregated trainer and rollout, send_weights only by checkpoint engine.
         """
+        ray.get(self.arctic_rl_client.update_weights.remote())
         return
 
     # TODO: CheckpointManager API Begin

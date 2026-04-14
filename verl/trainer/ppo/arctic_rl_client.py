@@ -180,9 +180,10 @@ class ArcticRLClientWrapper:
     def initialize(self, model_name: str):
         from arctic_training.arctic_rl import ArcticRLClient, ArcticRLClientConfig
 
-        n_gpus = self.config.trainer.n_gpus_per_node
-        #n_gpus = 2
-        colocate = self.config.actor_rollout_ref.hybrid_engine
+        n_training_gpus = self.config.arctic_rl.get("training_gpus", self.config.trainer.n_gpus_per_node)
+        n_sampling_gpus = self.config.arctic_rl.get("sampling_gpus", self.config.trainer.n_gpus_per_node)
+        n_log_prob_gpus = self.config.arctic_rl.get("log_prob_gpus", self.config.trainer.n_gpus_per_node)
+        colocate = self.config.arctic_rl.get("colocate", False)
         attn_implementation = self.config.actor_rollout_ref.model.override_config.get(
             'attn_implementation', 'eager'
         )
@@ -193,7 +194,7 @@ class ArcticRLClientWrapper:
 
         micro_batch_size = actor_cfg.ppo_micro_batch_size_per_gpu or 1
         train_batch_size = data_cfg.train_batch_size
-        grad_accum_steps = max(1, train_batch_size // (micro_batch_size * n_gpus))
+        grad_accum_steps = max(1, train_batch_size // (micro_batch_size * n_training_gpus))
         seq_parallel_size = actor_cfg.fsdp_config.get("ulysses_sequence_parallel_size", 1)
         max_length = data_cfg.max_prompt_length + data_cfg.max_response_length
 
@@ -213,9 +214,9 @@ class ArcticRLClientWrapper:
             host="localhost",
             port=7000,
             backend="local",
-            training_gpus=n_gpus,
-            sample_gpus=n_gpus,
-            log_prob_gpus=n_gpus,
+            training_gpus=n_training_gpus,
+            sampling_gpus=n_sampling_gpus,
+            log_prob_gpus=n_log_prob_gpus,
             colocate=colocate,
             log_prob_engine="deepspeed",
             model_name=model_name,
@@ -244,9 +245,9 @@ class ArcticRLClientWrapper:
         # ArcticRLClient is constructed as a ray remote actor with num_gpus=0,
         # which causes CUDA_VISIBLE_DEVICES to be empty.
         if colocate:
-            num_visible = n_gpus
+            num_visible = n_training_gpus + n_sampling_gpus + n_log_prob_gpus
         else:
-            num_visible = rl_config.training_gpus + rl_config.sample_gpus + rl_config.log_prob_gpus
+            num_visible = rl_config.training_gpus + rl_config.sampling_gpus + rl_config.log_prob_gpus
         os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(num_visible))
 
         self._client = ArcticRLClient(rl_config)
@@ -265,45 +266,28 @@ class ArcticRLClientWrapper:
         merged_params = {**self._default_sampling_params, **sampling_params}
         return self._client.generate(prompts=prompts, sampling_params=merged_params)
 
-    def compute_ref_log_prob(self, dss_batch_dict: dict, post_process_inputs: dict = None):
-        return self.compute_log_prob(dss_batch_dict, post_process_inputs)
 
-    def compute_log_prob(self, dss_batch_dict: dict, post_process_inputs: dict = None):
-        print(f"[ArcticRLWrapper] compute_log_prob INPUT: "
-              f"{{{', '.join(f'{k}: {v.shape}' for k, v in dss_batch_dict.items() if isinstance(v, torch.Tensor))}}}")
-        batch = {
-            "kwargs": dss_batch_dict,
-            "context": {"input_ids": dss_batch_dict["input_ids"]},
-            "processing": {
-                "post": ["compute_logprobs"],
-                "loss_fn": None,
-            },
+    def compute_ref_log_prob(self, payload: dict):
+        payload["processing"] = {"post": ["compute_logprobs", "compute_entropy"], "loss_fn": None}
+        response = self._client.fwd_no_grad(payload, reference_model=True)
+        response["batch"]["log_probs"] = response["batch"].pop("logprobs")
+        print(f"[ArcticRLWrapper] compute_ref_log_prob OUTPUT: {response.keys()=}")
+        return response
+
+
+    def compute_log_prob(self, payload: dict):
+        payload["processing"] = {"post": ["compute_logprobs", "compute_entropy"], "loss_fn": None}
+        response = self._client.fwd_no_grad(payload, reference_model=False)
+        response["batch"]["log_probs"] = response["batch"].pop("logprobs")
+        print(f"[ArcticRLWrapper] compute_log_prob OUTPUT: {response.keys()=}")
+        return response
+
+    def update_actor(self, payload: dict):
+        payload["processing"] = {
+            "post": ["apply_temperature", "compute_logprobs", "compute_entropy"], 
+            "loss_fn": "verl_grpo"
         }
-        result = self._client.fwd_no_grad(batch)
-        outputs = result.get("model_outputs", result)
-
-        log_probs = outputs.get("logprobs")
-        if log_probs is not None and not isinstance(log_probs, torch.Tensor):
-            log_probs = torch.tensor(log_probs)
-
-        # The pipeline doesn't return true entropy; approximate as
-        # -logprobs to match what grpo_loss uses internally (grpo.py:249).
-        entropy = -log_probs if log_probs is not None else None
-
-        print(f"[ArcticRLWrapper] compute_log_prob OUTPUT: "
-              f"entropy={entropy.shape if entropy is not None else None} "
-              f"log_probs={log_probs.shape if log_probs is not None else None}")
-        return entropy, log_probs
-
-    def update_actor(self, dss_batch_dict: dict, post_process_inputs: dict):
-        extra = post_process_inputs.get("extra_inputs", {})
-        seq_len = dss_batch_dict["input_ids"].shape[-1]
-
-        print(f"[ArcticRLWrapper] update_actor INPUT: "
-              f"{{{', '.join(f'{k}: {v.shape}' for k, v in dss_batch_dict.items() if isinstance(v, torch.Tensor))}}} "
-              f"| extra: {{{', '.join(f'{k}: {v.shape}' for k, v in extra.items() if isinstance(v, torch.Tensor))}}}")
-
-        def _left_pad(t: torch.Tensor) -> torch.Tensor:
+        def _left_pad(t: torch.Tensor, seq_len: int) -> torch.Tensor:
             """Left-pad a response-only tensor to full sequence length with zeros."""
             pad_len = seq_len - t.shape[-1]
             if pad_len <= 0:
@@ -311,25 +295,28 @@ class ArcticRLClientWrapper:
             pad = torch.zeros(*t.shape[:-1], pad_len, dtype=t.dtype, device=t.device)
             return torch.cat([pad, t], dim=-1)
 
-        context = {
-            "input_ids": dss_batch_dict["input_ids"],
-            "old_log_probs_shifted": _left_pad(extra["old_log_probs"]),
-            "advantages": _left_pad(extra["advantages"]),
-            "loss_mask": _left_pad(extra["response_mask"]),
-        }
-        print(f"[ArcticRLWrapper] update_actor CONTEXT: "
-              f"{{{', '.join(f'{k}: {v.shape}' for k, v in context.items() if isinstance(v, torch.Tensor))}}}")
-        batch = {"kwargs": dss_batch_dict, "context": context}
+        seq_len = payload["batch"]["input_ids"].shape[-1]
+        for name in ["old_log_probs", "advantages", "response_mask", "ref_log_prob"]:
+            if name in payload["batch"]:
+                payload["batch"][name] = _left_pad(payload["batch"][name], seq_len)
 
-        result = self._client.fwd_bwd(batch, processing={"loss_fn": "grpo", "post": ["compute_logprobs"]})
-        self._client.step()
+        fwd_bwd_response = self._client.fwd_bwd(payload)
+        print(f"[ArcticRLWrapper] update_actor OUTPUT: {fwd_bwd_response.keys()=}")
+        step_response = self._client.step()
+        print(f"[ArcticRLWrapper] update_actor STEP OUTPUT: {step_response.keys()=}")
+        step_response["metrics"].update(**fwd_bwd_response["metrics"])
+        return step_response
 
-        loss = result.get("avg_loss", 0.0)
-        raw_metrics = result.get("post_process_outputs", {})
-        metrics = {k: v if isinstance(v, list) else [v] for k, v in raw_metrics.items()}
 
-        print(f"[ArcticRLWrapper] update_actor OUTPUT: loss={loss} metrics={metrics}")
-        return loss, metrics
+    def save_checkpoint(self):
+        response = self._client.save_checkpoint()
+        print(f"[ArcticRLClientWrapper] save_checkpoint OUTPUT: {response.keys()=}")
+        return response
+
+    def update_weights(self):
+        response = self._client.sync_weights()
+        print(f"[ArcticRLClientWrapper] update_weights OUTPUT: {response.keys()=}")
+        return response
 
     def destroy(self):
         if self._client is not None:

@@ -313,3 +313,14 @@ ray_kwargs:
 
   # Path to save Ray timeline JSON for performance profiling
   timeline_json_file: null
+
+
+# config for arctic rl
+arctic_rl:
+
+  # whether to use colocate mode
+  colocate: False
+
+  training_gpus: 2
+  sampling_gpus: 1
+  log_prob_gpus: 1
