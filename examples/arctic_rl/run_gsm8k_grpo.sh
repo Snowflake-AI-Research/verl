@@ -6,17 +6,27 @@ export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
 export RAY_DEDUP_LOGS=0
 # BSZ=1024
-BSZ=2
+# MBS=256
+# UBS=32
+ROLL_N=5
+# MAX_STEPS=100
+PROMPT_LENGTH=512
+RESPONSE_LENGTH=1024
+BSZ=8
 MBS=2
 UBS=2
-ROLL_N=2
+# ROLL_N=2
 MAX_STEPS=4
+# PROMPT_LENGTH=64
+# RESPONSE_LENGTH=512
+
 # LR=0 
 LR=1e-6
-LOGGER=console
-# LOGGER="['console','wandb']"
-USE_KL_LOSS=True
-# USE_KL_LOSS=False 
+
+# LOGGER=console
+LOGGER="['console','wandb']"
+# USE_KL_LOSS=True
+USE_KL_LOSS=False 
 # REMOVE_PADDING=True
 REMOVE_PADDING=False
 MODEL="Qwen/Qwen3-0.6B"
@@ -25,18 +35,28 @@ STRATEGY="fsdp2"
 PYTHONUNBUFFERED=1 
 HYDRA_FULL_ERROR=1
 USE_LEGACY_WORKER_IMPL=disable
-NGPU_PER_NODE=1
+NGPU_PER_NODE=4
 ROLLOUT_NAME=vllm
 
 experiment_name="qwen3-0.6B_ngpu${NGPU_PER_NODE}_gbs${BSZ}_rolln${ROLL_N}_baseline"
+gpu_name=$(nvidia-smi --query-gpu=gpu_name  --format=csv,noheader -i 0)
+if [[ $gpu_name == *"H200"* ]]; then
+    echo "Running on Hopper"
+    flash_attention_v=flash_attention_3
+elif [[ $gpu_name == *"B200"* ]] || [[ $gpu_name == *"B300"* ]] ; then
+    echo "Running on Blackwell"
+    flash_attention_v=flash_attention_2
+else
+    echo "Running on unknown: $gpu_name; don't know which FA version to use"
+fi
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=/code/shared/gsm8k/train.parquet \
     data.val_files=/code/shared/gsm8k/test.parquet \
     data.train_batch_size=${BSZ} \
-    data.max_prompt_length=64 \
-    data.max_response_length=512 \
+    data.max_prompt_length=${PROMPT_LENGTH} \
+    data.max_response_length=${RESPONSE_LENGTH} \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.shuffle=False \
@@ -54,6 +74,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
+    +actor_rollout_ref.model.override_config.attn_implementation=$flash_attention_v \
     actor_rollout_ref.actor.strategy=${STRATEGY} \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \

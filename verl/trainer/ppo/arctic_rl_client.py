@@ -1,4 +1,5 @@
 import os
+from typing import Any
 import torch
 from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer
 from deepspeed.utils import OnDevice
@@ -177,6 +178,22 @@ class ArcticRLClientWrapper:
     def is_zorro_enabled(self):
         return self.use_zorro
 
+    def _create_ds_config(self, n_gpus: int) -> dict[str, Any]:
+        actor_cfg = self.config.actor_rollout_ref.actor
+        data_cfg = self.config.data
+
+        micro_batch_size = actor_cfg.ppo_micro_batch_size_per_gpu or 1
+        train_batch_size = data_cfg.train_batch_size
+        grad_accum_steps = max(1, train_batch_size // (micro_batch_size * n_gpus))
+        train_seq_parallel_size = actor_cfg.fsdp_config.get("ulysses_sequence_parallel_size", 1)
+        return {
+            "train_micro_batch_size_per_gpu": micro_batch_size,
+            "train_batch_size": train_batch_size,
+            "gradient_accumulation_steps": grad_accum_steps,
+            "sequence_parallel_size": train_seq_parallel_size,
+            "zero_optimization": {"stage": 1},
+    }
+
     def initialize(self, model_name: str):
         from arctic_training.arctic_rl import ArcticRLClient, ArcticRLClientConfig
 
@@ -192,10 +209,6 @@ class ArcticRLClientWrapper:
         optim_cfg = actor_cfg.optim
         data_cfg = self.config.data
 
-        micro_batch_size = actor_cfg.ppo_micro_batch_size_per_gpu or 1
-        train_batch_size = data_cfg.train_batch_size
-        grad_accum_steps = max(1, train_batch_size // (micro_batch_size * n_training_gpus))
-        seq_parallel_size = actor_cfg.fsdp_config.get("ulysses_sequence_parallel_size", 1)
         max_length = data_cfg.max_prompt_length + data_cfg.max_response_length
 
         rollout_cfg = self.config.actor_rollout_ref.rollout
@@ -220,13 +233,8 @@ class ArcticRLClientWrapper:
             colocate=colocate,
             log_prob_engine="deepspeed",
             model_name=model_name,
-            ds_config={
-                "train_micro_batch_size_per_gpu": micro_batch_size,
-                "train_batch_size": train_batch_size,
-                "gradient_accumulation_steps": grad_accum_steps,
-                "sequence_parallel_size": seq_parallel_size,
-                "zero_optimization": {"stage": 1},
-            },
+            ds_config=self._create_ds_config(n_training_gpus),
+            log_prob_ds_config=self._create_ds_config(n_log_prob_gpus),
             training_config={
                 "optimizer": {
                     "lr": optim_cfg.lr,
@@ -285,7 +293,8 @@ class ArcticRLClientWrapper:
     def update_actor(self, payload: dict):
         payload["processing"] = {
             "post": ["apply_temperature", "compute_logprobs", "compute_entropy"], 
-            "loss_fn": "verl_grpo"
+            #"loss_fn": "verl_grpo"
+            "loss_fn": "grpo"
         }
         def _left_pad(t: torch.Tensor, seq_len: int) -> torch.Tensor:
             """Left-pad a response-only tensor to full sequence length with zeros."""
@@ -299,6 +308,8 @@ class ArcticRLClientWrapper:
         for name in ["old_log_probs", "advantages", "response_mask", "ref_log_prob"]:
             if name in payload["batch"]:
                 payload["batch"][name] = _left_pad(payload["batch"][name], seq_len)
+
+        payload["batch"]["loss_mask"] = payload["batch"]["response_mask"]
 
         fwd_bwd_response = self._client.fwd_bwd(payload)
         print(f"[ArcticRLWrapper] update_actor OUTPUT: {fwd_bwd_response.keys()=}")

@@ -20,12 +20,12 @@ export CUDA_VISIBLE_DEVICES=
 # RESPONSE_LENGTH=1024
 
 BSZ=8
-MBS=4
+MBS=2
 UBS=2
 ROLL_N=2
 MAX_STEPS=4
-PROMPT_LENGTH=64
-RESPONSE_LENGTH=512
+PROMPT_LENGTH=512
+RESPONSE_LENGTH=1024
 
 # LR=0
 LR=1e-6
@@ -101,6 +101,9 @@ python3 -m verl.trainer.main_ppo \
     trainer.use_legacy_worker_impl=${USE_LEGACY_WORKER_IMPL} \
     trainer.use_arctic_rl=${USE_ARCTIC_RL} \
     arctic_rl.colocate=${COLOCATE} \
+    arctic_rl.training_gpus=1\
+    arctic_rl.sampling_gpus=2\
+    arctic_rl.log_prob_gpus=1\
     trainer.critic_warmup=0 \
     trainer.logger=${LOGGER} \
     trainer.experiment_name=${experiment_name} \

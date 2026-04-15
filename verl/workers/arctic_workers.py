@@ -479,8 +479,8 @@ class TrainingWorker(Worker, DistProfilerExtension):
             # we need to serialize the config object to dict
             # dataclasses.asdict only returns keys that are defined at init (vars will do more) - but perhaps we want `asdict`?
             actor_config_as_dict = vars(self.actor_config)
-            print(f"update_actor: {self.actor_config=}")
-            print(f"update_actor: {actor_config_as_dict=}")
+            # print(f"update_actor: {self.actor_config=}")
+            # print(f"update_actor: {actor_config_as_dict=}")
             import json
             def safe_serialize(obj):
                 return json.loads(json.dumps(obj, default=lambda o: None))
