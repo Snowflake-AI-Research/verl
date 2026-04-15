@@ -191,14 +191,14 @@ def no_padding_2_padding_prompt_response(tensor: torch.Tensor, data: TensorDict,
 
     sequence_lens = prompt_lens + response_lens
     sequence_offsets = sequence_lens.cumsum(dim=0)
-    print(f"{data=}")
-    print(f"{prompt_lens=}")
-    print(f"{response_lens=}")
-    print(f"{max_prompt_len=}")
-    print(f"{max_response_len=}")
-    print(f"{sequence_offsets=}")
-    print(f"{values=}")
-    print(f"{values.shape=}")
+    # print(f"{data=}")
+    # print(f"{prompt_lens=}")
+    # print(f"{response_lens=}")
+    # print(f"{max_prompt_len=}")
+    # print(f"{max_response_len=}")
+    # print(f"{sequence_offsets=}")
+    # print(f"{values=}")
+    # print(f"{values.shape=}")
     assert sequence_offsets[-1].item() == values.shape[0], f"{sequence_offsets[-1].item()} != {values.shape[0]}"
 
     input_ids_list = []
