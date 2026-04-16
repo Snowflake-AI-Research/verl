@@ -203,7 +203,7 @@ trainer:
   #  mode: "auto", "enable", or "disable"
   use_legacy_worker_impl: auto
 
-  # whether to use arctic rl 
+  # whether to use arctic rl
   use_arctic_rl: False
 
 # profiler configs
@@ -324,3 +324,5 @@ arctic_rl:
   training_gpus: 1
   sampling_gpus: 1
   log_prob_gpus: 1
+
+  use_zorro: False

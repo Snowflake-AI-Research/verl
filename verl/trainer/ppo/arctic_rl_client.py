@@ -38,7 +38,7 @@ class ArcticRLClient4VeRL:
         config: verl's full config
         """
         self.config = config
-        self.use_zorro = USE_ARCTIC_ZORRO
+        self.use_zorro = self.config.arctic_rl.use_zorro
         #print(f"ArcticRLClient4VeRL {config=}")
 
         self.arctic_inference_client = DSSInferenceClient(dss_server_url="http://localhost:7000")
@@ -97,6 +97,20 @@ class ArcticRLClient4VeRL:
             "attn_implementation": attn_implementation,
         }
 
+        if self.is_zorro_enabled():
+            # XXX: can't find where it's configured
+            use_unpad = True
+
+            training_config.update(
+                use_zorro=True,
+                response_len=self.config.data.max_response_length,
+                max_token_len=self.config.actor_rollout_ref.rollout.max_num_batched_tokens,
+                rollout_n=self.config.actor_rollout_ref.rollout.n,
+                temperature=self.config.actor_rollout_ref.rollout.temperature,
+                use_unpad=use_unpad,
+            )
+            #print(f"{training_config=}")
+
         self.training_engine = self.arctic_training_client.initialize(
             model=create_meta_model(model_name),
             ds_config=ds_config,
@@ -121,7 +135,7 @@ class ArcticRLClient4VeRL:
         #     log_probs = torch.tensor(log_probs).squeeze()
         print(f"arctic_rl_client.compute_ref_log_prob: {response['batch']['entropy'].shape=}, {response['batch']['log_probs'].shape=}")
         return response
-    
+
 
     def compute_log_prob(self, payload: dict):
         # XXX: somehow we need to differentiate which model is this called on ref vs actor - at the moment it's always actor hardcoded
@@ -173,7 +187,7 @@ class ArcticRLClientWrapper:
         self.config = config
         self._client = None
         self.tokenizer = None
-        self.use_zorro = USE_ARCTIC_ZORRO
+        self.use_zorro = self.config.arctic_rl.use_zorro
 
     def is_zorro_enabled(self):
         return self.use_zorro
@@ -193,6 +207,24 @@ class ArcticRLClientWrapper:
             "sequence_parallel_size": train_seq_parallel_size,
             "zero_optimization": {"stage": 1},
     }
+
+    def _create_ds_worker_config(self):
+
+        if self.is_zorro_enabled():
+            # XXX: can't find where it's configured
+            use_unpad = True
+
+            return dict(
+                use_zorro=True,
+                response_len=self.config.data.max_response_length,
+                max_token_len=self.config.actor_rollout_ref.rollout.max_num_batched_tokens,
+                rollout_n=self.config.actor_rollout_ref.rollout.n,
+                temperature=self.config.actor_rollout_ref.rollout.temperature,
+                use_unpad=use_unpad,
+            )
+        else:
+            return {}
+
 
     def initialize(self, model_name: str):
         from arctic_training.arctic_rl import ArcticRLClient, ArcticRLClientConfig
@@ -247,6 +279,7 @@ class ArcticRLClientWrapper:
                 "model_config": None,
                 "attn_implementation": attn_implementation,
             },
+            ds_worker_config=self._create_ds_worker_config(),
             vllm_config=vllm_config,
         )
 
@@ -292,7 +325,7 @@ class ArcticRLClientWrapper:
 
     def update_actor(self, payload: dict):
         payload["processing"] = {
-            "post": ["apply_temperature", "compute_logprobs", "compute_entropy"], 
+            "post": ["apply_temperature", "compute_logprobs", "compute_entropy"],
             #"loss_fn": "verl_grpo"
             "loss_fn": "grpo"
         }
