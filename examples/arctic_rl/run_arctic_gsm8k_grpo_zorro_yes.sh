@@ -6,6 +6,7 @@ export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
 export RAY_DEDUP_LOGS=0
 export HF_HUB_OFFLINE=1
+export USE_ARCTIC_TRAINING_CLIENT=1
 export USE_ARCTIC_ZORRO=1
 
 # we want to make sure this runs on non-gpu client
