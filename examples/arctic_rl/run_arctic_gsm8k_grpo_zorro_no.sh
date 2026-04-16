@@ -77,7 +77,7 @@ python3 -m verl.trainer.main_ppo \
     +data.seed=42 \
     actor_rollout_ref.actor.data_loader_seed=42 \
     reward.num_workers=1 \
-    actor_rollout_ref.rollout.agent.num_workers=1 \
+    actor_rollout_ref.rollout.agent.num_workers=4 \
     actor_rollout_ref.model.path=$MODEL \
     actor_rollout_ref.actor.optim.lr=$LR \
     actor_rollout_ref.model.use_remove_padding=$REMOVE_PADDING \

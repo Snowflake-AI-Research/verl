@@ -302,10 +302,10 @@ class ArcticRLClientWrapper:
         "max_tokens": 1024,
     }
 
-    def generate(self, prompt_ids, sampling_params) -> list:
+    async def generate(self, prompt_ids, sampling_params) -> list:
         prompts = [self.tokenizer.decode(prompt_ids)] # TODO: pass prompt_ids directly
         merged_params = {**self._default_sampling_params, **sampling_params}
-        return self._client.generate(prompts=prompts, sampling_params=merged_params)
+        return await self._client.async_generate(prompts=prompts, sampling_params=merged_params)
 
 
     def compute_ref_log_prob(self, payload: dict):
