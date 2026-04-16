@@ -12,7 +12,6 @@ export USE_ARCTIC_ZORRO=0
 export CUDA_VISIBLE_DEVICES=
 
 # BSZ=1024
-# MBS=256
 # UBS=32
 # ROLL_N=5
 # MAX_STEPS=100
@@ -20,7 +19,6 @@ export CUDA_VISIBLE_DEVICES=
 # RESPONSE_LENGTH=1024
 
 # BSZ=4
-# MBS=4
 # UBS=2
 # ROLL_N=5
 # MAX_STEPS=4
@@ -28,7 +26,6 @@ export CUDA_VISIBLE_DEVICES=
 # RESPONSE_LENGTH=1024
 
 BSZ=2
-MBS=2
 UBS=2
 ROLL_N=4
 MAX_STEPS=4
@@ -40,8 +37,8 @@ LR=1e-6
 
 LOGGER=console
 # LOGGER="['console','wandb']"
-# USE_KL_LOSS=True
-USE_KL_LOSS=False
+USE_KL_LOSS=True
+# USE_KL_LOSS=False
 # REMOVE_PADDING=True
 REMOVE_PADDING=False
 MODEL="Qwen/Qwen3-0.6B"
@@ -83,7 +80,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.path=$MODEL \
     actor_rollout_ref.actor.optim.lr=$LR \
     actor_rollout_ref.model.use_remove_padding=$REMOVE_PADDING \
-    actor_rollout_ref.actor.ppo_mini_batch_size=$MBS \
+    actor_rollout_ref.actor.ppo_mini_batch_size=$BSZ \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$UBS \
     actor_rollout_ref.actor.use_kl_loss=$USE_KL_LOSS \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \

@@ -197,7 +197,7 @@ class ArcticRLClientWrapper:
         data_cfg = self.config.data
 
         micro_batch_size = actor_cfg.ppo_micro_batch_size_per_gpu or 1
-        train_batch_size = data_cfg.train_batch_size
+        train_batch_size = data_cfg.train_batch_size * self.config.actor_rollout_ref.rollout.n
         grad_accum_steps = max(1, train_batch_size // (micro_batch_size * n_gpus))
         train_seq_parallel_size = actor_cfg.fsdp_config.get("ulysses_sequence_parallel_size", 1)
         return {

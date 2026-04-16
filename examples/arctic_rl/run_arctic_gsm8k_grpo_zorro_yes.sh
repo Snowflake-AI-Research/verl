@@ -13,7 +13,6 @@ export CUDA_VISIBLE_DEVICES=
 
 # BSZ=1024
 BSZ=4
-MBS=4
 UBS=2
 ROLL_N=2
 MAX_STEPS=4
@@ -21,7 +20,6 @@ PROMPT_LENGTH=64
 RESPONSE_LENGTH=512
 
 # BSZ=1
-# MBS=1
 # UBS=1
 # ROLL_N=16
 # MAX_STEPS=4
@@ -29,7 +27,6 @@ RESPONSE_LENGTH=512
 # RESPONSE_LENGTH=2048
 
 # BSZ=2
-# MBS=2
 # UBS=2
 # ROLL_N=4
 # MAX_STEPS=4
@@ -83,7 +80,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.path=$MODEL \
     actor_rollout_ref.actor.optim.lr=$LR \
     actor_rollout_ref.model.use_remove_padding=$REMOVE_PADDING \
-    actor_rollout_ref.actor.ppo_mini_batch_size=$MBS \
+    actor_rollout_ref.actor.ppo_mini_batch_size=$BSZ \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$UBS \
     actor_rollout_ref.actor.use_kl_loss=$USE_KL_LOSS \
     actor_rollout_ref.actor.kl_loss_coef=0.001 \
