@@ -326,7 +326,7 @@ class ArcticRLClientWrapper:
     def update_actor(self, payload: dict):
         payload["processing"] = {
             "post": ["apply_temperature", "compute_logprobs", "compute_entropy"],
-            #"loss_fn": "verl_grpo"
+            # "loss_fn": "verl_grpo"
             "loss_fn": "grpo"
         }
         def _left_pad(t: torch.Tensor, seq_len: int) -> torch.Tensor:

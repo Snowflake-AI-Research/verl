@@ -6,9 +6,8 @@ export PYTHONUNBUFFERED=1
 export HYDRA_FULL_ERROR=1
 export RAY_DEDUP_LOGS=0
 export HF_HUB_OFFLINE=1
+export HF_HOME=/checkpoint/huggingface
 export USE_ARCTIC_TRAINING_CLIENT=1
-export USE_ARCTIC_ZORRO=1
-
 # we want to make sure this runs on non-gpu client
 export CUDA_VISIBLE_DEVICES=
 
@@ -50,8 +49,9 @@ USE_LEGACY_WORKER_IMPL=disable
 NGPU_PER_NODE=1
 ROLLOUT_NAME=arctic # entry point into ArcticRL
 USE_ARCTIC_RL=True
+USE_ARCTIC_ZORRO=True
 COLOCATE=False
-experiment_name="qwen3-0.6B_ngpu$NGPU_PER_NODE_gbs$BSZ_rolln$ROLL_N_zorro$USE_ARCTIC_ZORRO"
+experiment_name="qwen3-0.6B_ngpu${NGPU_PER_NODE}_gbs${BSZ}_rolln${ROLL_N}_zorro${USE_ARCTIC_ZORRO}"
 
 gpu_name=$(nvidia-smi --query-gpu=gpu_name  --format=csv,noheader -i 0)
 if [[ $gpu_name == *"H200"* ]]; then
@@ -77,7 +77,7 @@ python3 -m verl.trainer.main_ppo \
     +data.seed=42 \
     actor_rollout_ref.actor.data_loader_seed=42 \
     reward.num_workers=1 \
-    actor_rollout_ref.rollout.agent.num_workers=1 \
+    actor_rollout_ref.rollout.agent.num_workers=4 \
     actor_rollout_ref.model.path=$MODEL \
     actor_rollout_ref.actor.optim.lr=$LR \
     actor_rollout_ref.model.use_remove_padding=$REMOVE_PADDING \
@@ -108,7 +108,7 @@ python3 -m verl.trainer.main_ppo \
     arctic_rl.training_gpus=1\
     arctic_rl.sampling_gpus=2\
     arctic_rl.log_prob_gpus=1\
-    arctic_rl.use_zorro=True \
+    arctic_rl.use_zorro=$USE_ARCTIC_ZORRO \
     trainer.critic_warmup=0 \
     trainer.logger=$LOGGER \
     trainer.experiment_name=$experiment_name \
