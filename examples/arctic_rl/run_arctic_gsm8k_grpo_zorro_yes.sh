@@ -11,13 +11,12 @@ export USE_ARCTIC_TRAINING_CLIENT=1
 # we want to make sure this runs on non-gpu client
 export CUDA_VISIBLE_DEVICES=
 
-# BSZ=1024
-BSZ=4
-UBS=2
-ROLL_N=2
-MAX_STEPS=4
-PROMPT_LENGTH=64
-RESPONSE_LENGTH=512
+BSZ=16
+UBS=16
+ROLL_N=5
+MAX_STEPS=40
+PROMPT_LENGTH=512
+RESPONSE_LENGTH=1024
 
 # BSZ=1
 # UBS=1
@@ -36,8 +35,8 @@ RESPONSE_LENGTH=512
 # LR=0
 LR=1e-6
 
-LOGGER=console
-# LOGGER="['console','wandb']"
+#LOGGER=console
+LOGGER="['console','wandb']"
 # USE_KL_LOSS=True
 USE_KL_LOSS=False
 # REMOVE_PADDING=True
@@ -112,13 +111,13 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger=$LOGGER \
     trainer.experiment_name=$experiment_name \
-    trainer.project_name='verl_arctic_grpo_gsm8k' \
+    trainer.project_name=arctic_rl_bird_sql \
     trainer.val_before_train=False \
     trainer.n_gpus_per_node=$NGPU_PER_NODE \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=-1 \
     trainer.total_training_steps=$MAX_STEPS \
-    trainer.total_epochs=15 $@ 2>&1 | tee $experiment_name.log
+    trainer.total_epochs=15 \
+    "$@" 2>&1 | tee $experiment_name.log
 
-        # trainer.total_training_steps=$MAX_STEPS \
