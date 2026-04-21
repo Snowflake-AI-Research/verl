@@ -321,8 +321,6 @@ arctic_rl:
   # whether to use colocate mode
   colocate: False
 
-  use_arctic_rl_client: True
-
   training_gpus: 1
   sampling_gpus: 1
   log_prob_gpus: 1

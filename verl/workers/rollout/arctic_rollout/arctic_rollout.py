@@ -1,10 +1,10 @@
-import ray 
+import ray
 from typing import Any, Optional
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 
 import argparse
 from typing import Any, Optional
-from verl.trainer.ppo.arctic_rl_client import ArcticRLClient4VeRL
+from verl.trainer.ppo.arctic_rl_client import ArcticRLClientWrapper
 from collections.abc import AsyncGenerator
 
 import ray
@@ -31,7 +31,7 @@ class ArcticLLMEngine:
     def __init__(
         self,
         replica_rank: int,
-        arctic_rl_client: ArcticRLClient4VeRL,
+        arctic_rl_client: ArcticRLClientWrapper,
     ):
         self.replica_rank = replica_rank
         self.arctic_rl_client = arctic_rl_client
@@ -88,7 +88,7 @@ class ArcticLLMServer(vLLMHttpServer):
         config: RolloutConfig,
         model_config: HFModelConfig,
         rollout_mode: RolloutMode,
-        arctic_rl_client: ArcticRLClient4VeRL,
+        arctic_rl_client: ArcticRLClientWrapper,
         workers: list[ActorHandle] = [],
         replica_rank: int = 0,
         node_rank: int = 0,
@@ -148,24 +148,24 @@ class ArcticLLMServer(vLLMHttpServer):
         #     f"data_parallel_rpc_port: {self._dp_rpc_port}, data_parallel_master_port: {self._dp_master_port}"
         # )
 
-    def get_master_address(self): pass 
+    def get_master_address(self): pass
 
-    def get_server_address(self): pass 
+    def get_server_address(self): pass
 
     @property
-    def lora_as_adapter(self) -> bool: pass 
+    def lora_as_adapter(self) -> bool: pass
 
     async def collective_rpc(
         self,
         **kwargs,
     ):
-        pass 
+        pass
 
     async def launch_server(self, master_address: str = None, master_port: int = None, dp_rpc_port: int = None):
-        pass 
+        pass
 
     async def run_server(self, args: argparse.Namespace):
-        pass 
+        pass
 
 
     async def generate(
@@ -319,4 +319,3 @@ class ArcticReplica(RolloutReplica):
 
     async def abort_request(self, request_id: str) -> dict[str, Any]:
         return {"aborted": True, "request_id": 0}
-        

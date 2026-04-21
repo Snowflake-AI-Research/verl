@@ -143,7 +143,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.total_training_steps=$MAX_STEPS \
     arctic_rl.colocate=$COLOCATE \
     arctic_rl.training_gpus=1\
-    arctic_rl.sampling_gpus=1\
+    arctic_rl.sampling_gpus=2\
     arctic_rl.log_prob_gpus=1\
     arctic_rl.use_zorro=$USE_ARCTIC_ZORRO \
     "$@" 2>&1 | tee $experiment_name.log
