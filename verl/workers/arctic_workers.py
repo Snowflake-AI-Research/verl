@@ -88,6 +88,82 @@ def load_dump_data(train_batch_size, roll_n) -> dict[str, DataProto]:
     return dump_data
 
 
+
+def no_padding_2_padding_prompt_response(tensor: torch.Tensor, data: TensorDict, pad_token_id) -> torch.Tensor:
+    """Convert jagged tensor into a left padded prompt and right padded prompt of [bsz, max_response_len], which looks like
+    tensor([
+      [pad...prompt | response...pad],
+      [pad...prompt | response...pad],
+      [pad...prompt | response...pad]
+    ])
+
+    Args:
+        tensor: a nested tensor or a 1D tensor in shape (total_nnz,),
+            total_nnz is the total number of tokens across all sequences in the batch
+        data: TensorDict with "prompts", "responses", "attention_mask"
+        pad_token_id: token to pad with
+
+    Returns:
+        tensor: sliced prompt+response tensor of shape [bsz, max_response_len] w/ left and right padding
+
+    """
+    # print(f"{tensor.is_nested=}")
+    values = tensor.values() if tensor.is_nested else tensor
+    prompt_ids = data["prompts"]
+    response_ids = data["responses"]
+    attention_mask = data["attention_mask"]
+    # print(f"{prompt_ids.shape=}")
+    # print(f"{response_ids.shape=}")
+    # print(f"{attention_mask.shape=}")
+    # print(f"{attention_mask=}")
+
+    max_prompt_len = tu.get_non_tensor_data(data=data, key="max_prompt_len", default=-1)
+    max_response_len = tu.get_non_tensor_data(data=data, key="max_response_len", default=-1)
+    # print(f"data {max_prompt_len=}")
+    # print(f"data {max_response_len=}")
+
+    # print(f"{prompt_ids.is_nested=}")
+    if prompt_ids.is_nested:
+        prompt_lens = prompt_ids.offsets().diff()
+        response_lens = response_ids.offsets().diff()
+        if max_prompt_len < 0:
+            max_prompt_len = prompt_lens.max().item()
+        if max_response_len < 0:
+            max_response_len = response_lens.max().item()
+    else:
+        assert not attention_mask.is_nested
+        prompt_lens = attention_mask[:, : prompt_ids.shape[1]].sum(dim=1)
+        response_lens = attention_mask[:, prompt_ids.shape[1] :].sum(dim=1)
+        max_prompt_len = prompt_ids.shape[1]
+        max_response_len = response_ids.shape[1]
+
+    sequence_lens = prompt_lens + response_lens
+    sequence_offsets = sequence_lens.cumsum(dim=0)
+    # print(f"{data=}")
+    # print(f"{prompt_lens=}")
+    # print(f"{response_lens=}")
+    # print(f"{max_prompt_len=}")
+    # print(f"{max_response_len=}")
+    # print(f"{sequence_offsets=}")
+    # print(f"{values=}")
+    # print(f"{values.shape=}")
+    assert sequence_offsets[-1].item() == values.shape[0], f"{sequence_offsets[-1].item()} != {values.shape[0]}"
+
+    input_ids_list = []
+    for prompt_len, resp_len, seq_offset in zip(prompt_lens, response_lens, sequence_offsets, strict=True):
+        prompt_pad_size = max_prompt_len - prompt_len
+        response_pad_size = max_response_len - resp_len
+        prompt = values[seq_offset - prompt_len - resp_len: seq_offset - resp_len]
+        response = values[seq_offset - resp_len: seq_offset]
+        prompt_padded_left = F.pad(prompt, (prompt_pad_size, 0), value=pad_token_id)
+        response_padded_right = F.pad(response, (0, response_pad_size), value=pad_token_id)
+        input_ids_list.append(torch.cat((prompt_padded_left, response_padded_right)))
+
+    output = torch.stack(input_ids_list, dim=0)
+    #print(f"{output=}")
+    return output, max_prompt_len, max_response_len
+
+
 def prepare_model_inputs_remove_padding(micro_batch: TensorDict):
     from verl.utils import tensordict_utils as tu
     from verl.utils.dataset.dataset_utils import DatasetPadMode
@@ -185,7 +261,6 @@ def prepare_padded_dss_batch_dict(data: TensorDict, pad_token_id) -> dict:
     input_ids = data['input_ids']
     position_ids = data['position_ids']
 
-    from verl.workers.utils.padding import no_padding_2_padding_prompt_response
     orig_iput_ids_shape = input_ids.shape
     orig_position_ids_shape = position_ids.shape
     input_ids, max_prompt_len, max_response_len = no_padding_2_padding_prompt_response(tensor=input_ids, data=data, pad_token_id=pad_token_id)
@@ -193,7 +268,7 @@ def prepare_padded_dss_batch_dict(data: TensorDict, pad_token_id) -> dict:
     position_ids, _, _= no_padding_2_padding_prompt_response(tensor=position_ids, data=data, pad_token_id=0)
     attention_mask = data['attention_mask']
 
-    print(f"{input_ids.shape=} {position_ids.shape=} {attention_mask.shape=} {orig_iput_ids_shape=} {orig_position_ids_shape=}")
+    # print(f"{input_ids.shape=} {position_ids.shape=} {attention_mask.shape=} {orig_iput_ids_shape=} {orig_position_ids_shape=}")
 
     dss_batch_dict = dict(
         input_ids=input_ids,
@@ -420,25 +495,23 @@ class TrainingWorker(Worker, DistProfilerExtension):
             position_ids = data['position_ids']
             #input_ids = input_ids.unbind()
 
-            from verl.workers.utils.padding import no_padding_2_padding_prompt_response
             # XXX: move to init
-  
 
             input_ids, max_prompt_len, max_response_len = no_padding_2_padding_prompt_response(tensor=input_ids, data=data, pad_token_id=self.pad_token_id)
             # XXX: 0 pad on pos ids is odd, check the original - perhaps need to re-build pos ids?
             position_ids, _, _= no_padding_2_padding_prompt_response(tensor=position_ids, data=data, pad_token_id=0)
-            print(f"{input_ids.shape=}")
-            print(f"{input_ids=}")
+            # print(f"{input_ids.shape=}")
+            # print(f"{input_ids=}")
 
             #input_ids = torch.nested.to_padded_tensor(input_ids, padding=4.2)
             #position_ids = torch.nested.to_padded_tensor(position_ids, padding=4.2)
 
-            print(f"{data['attention_mask'].shape=}")
-            print(f"{data['attention_mask']=}")
-            print(f"{input_ids.shape=}")
-            print(f"{input_ids=}")
-            print(f"{position_ids.shape=}")
-            print(f"{position_ids=}")
+            # print(f"{data['attention_mask'].shape=}")
+            # print(f"{data['attention_mask']=}")
+            # print(f"{input_ids.shape=}")
+            # print(f"{input_ids=}")
+            # print(f"{position_ids.shape=}")
+            # print(f"{position_ids=}")
             # XXX: fixme
             # batch = batch[0]
 
@@ -498,7 +571,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
             # print(f"update_actor: {loss=}")
             metrics = response['metrics']
             loss = metrics.pop("loss")
-            print(f"update_actor: {metrics=}")
+            # print(f"update_actor: {metrics=}")
 
 
         from verl.utils.metric import AggregationType, Metric
@@ -519,7 +592,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         # }
 
         # print(f"{data=}")
-        print(f"{data["input_ids"].shape=}")
+        # print(f"{data["input_ids"].shape=}")
 
         # expected output so far
         #
@@ -699,7 +772,7 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
 
         response = ray.get(compute_log_prob_fn.remote(payload))
 
-        print(f"compute_any_log_prob: {response['batch']['entropy'].shape=} {response['batch']['log_probs'].shape=}")
+        # print(f"compute_any_log_prob: {response['batch']['entropy'].shape=} {response['batch']['log_probs'].shape=}")
 
         #batch_output = postprocess_log_prob_output(data=data, entropy=entropy, log_probs=log_probs)
         #model_output = batch_output.pop("model_output", {})
@@ -707,10 +780,10 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
         # verl wants a full [bs, max_prompt_len+max_response_len] tensors and jagged
         entropy = prepand_max_prompt_len_zeros(response['batch']['entropy'], max_prompt_len)
         log_probs = prepand_max_prompt_len_zeros(response['batch']['log_probs'], max_prompt_len)
-        print(f"compute_any_log_prob: {entropy.shape=} {log_probs.shape=}")
+        # print(f"compute_any_log_prob: {entropy.shape=} {log_probs.shape=}")
         entropy = make_njt(data, entropy)
         log_probs = make_njt(data, log_probs)
-        print(f"compute_any_log_prob: {entropy.shape=} {log_probs.shape=}")
+        # print(f"compute_any_log_prob: {entropy.shape=} {log_probs.shape=}")
 
         model_output = dict(entropy=entropy, log_probs=log_probs)
         metrics = response['metrics']

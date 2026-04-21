@@ -14,7 +14,7 @@ USE_ARCTIC_ZORRO = os.environ.get("USE_ARCTIC_ZORRO", "0") == "1"
 
 
 def create_arctic_rl_client(config):
-    cls = ArcticRLClientWrapper if USE_ARCTIC_TRAINING_CLIENT else ArcticRLClient4VeRL
+    cls = ArcticRLClientWrapper if config.arctic_rl.use_arctic_rl_client else ArcticRLClient4VeRL
     sched_pg = placement_group([{"GPU": 0, "CPU": 1}])
     return ray.remote(
         num_cpus=0,
