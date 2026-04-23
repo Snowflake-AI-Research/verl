@@ -94,7 +94,6 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
     Returns:
         tensor: sliced response tensor of shape [bsz, max_response_len]
     """
-    # print(f"{tensor.is_nested=}")
     values = tensor.values() if tensor.is_nested else tensor
     prompt_ids = data["prompts"]
     response_ids = data["responses"]
