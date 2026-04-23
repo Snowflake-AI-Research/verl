@@ -34,7 +34,7 @@ COLOCATE=False
 # BSZ=32
 # ROLL_N=16
 BSZ=4
-ROLL_N=2
+ROLL_N=4
 MAX_STEPS=10
 PROMPT_LEN=16384
 RESPONSE_LEN=4096
@@ -142,8 +142,8 @@ python3 -m verl.trainer.main_ppo \
     custom_reward_function.name=compute_score \
     trainer.total_training_steps=$MAX_STEPS \
     arctic_rl.colocate=$COLOCATE \
-    arctic_rl.training_gpus=1\
-    arctic_rl.sampling_gpus=2\
-    arctic_rl.log_prob_gpus=1\
+    arctic_rl.training_gpus=2\
+    arctic_rl.sampling_gpus=4\
+    arctic_rl.log_prob_gpus=2\
     arctic_rl.use_zorro=$USE_ARCTIC_ZORRO \
     "$@" 2>&1 | tee $experiment_name.log

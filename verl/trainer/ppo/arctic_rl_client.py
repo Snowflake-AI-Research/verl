@@ -3,7 +3,6 @@ from typing import Any
 import torch
 from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer
 from deepspeed.utils import OnDevice
-from dss_client.client import DSSInferenceClient, DSSTrainingClient, DSSLogProbClient
 import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from ray.util.placement_group import placement_group
@@ -19,12 +18,6 @@ def create_arctic_rl_client(config):
             placement_group_capture_child_tasks=True,
         ),
     )(ArcticRLClientWrapper).remote(config)
-
-def create_meta_model(name_or_path: str):
-    model_config = AutoConfig.from_pretrained(name_or_path)
-    with OnDevice(dtype=torch.float16, device='meta'):
-        meta_model = AutoModelForCausalLM.from_config(model_config)
-    return meta_model
 
 
 class ArcticRLClientWrapper:
@@ -206,9 +199,10 @@ class ArcticRLClientWrapper:
         return response
 
     def update_weights(self):
-        response = self._client.sync_weights()
-        print(f"[ArcticRLClientWrapper] update_weights OUTPUT: {response.keys()=}")
-        return response
+        return None # TODO: Implement this
+        # response = self._client.sync_weights()
+        # print(f"[ArcticRLClientWrapper] update_weights OUTPUT: {response.keys()=}")
+        # return response
 
     def destroy(self):
         if self._client is not None:

@@ -71,24 +71,6 @@ def create_meta_model(name_or_path: str):
     return meta_model
 
 
-DATA_PROTO_KEYS = ["gen_batch_output", "old_log_prob", "ref_log_prob", "compute_advantage", "actor_output"]
-TENSOR_DICT_KEYS = ["full_log_prob", "full_ref_log_prob", "full_actor_output"]
-
-def load_dump_data(train_batch_size, roll_n) -> dict[str, DataProto]:
-    global_step = 1
-    dump_data = {}
-    dump_path = os.path.join('/code/users/truwase/data/at_verl_dump', f'tbs{train_batch_size}_n{roll_n}')
-    dump_dir = Path(dump_path)
-    os.path.exists(dump_dir)
-    for key in DATA_PROTO_KEYS:
-        dump_data[key] = DataProto.load_from_disk(Path(dump_dir, f"{global_step}_{key}.pt"))
-    for key in TENSOR_DICT_KEYS:
-        dump_data[key] = torch.load(Path(dump_dir, f"{global_step}_{key}.pt"), weights_only=False)
-
-    return dump_data
-
-
-
 def no_padding_2_padding_prompt_response(tensor: torch.Tensor, data: TensorDict, pad_token_id) -> torch.Tensor:
     """Convert jagged tensor into a left padded prompt and right padded prompt of [bsz, max_response_len], which looks like
     tensor([
@@ -279,109 +261,162 @@ def prepare_padded_dss_batch_dict(data: TensorDict, pad_token_id) -> dict:
 
     return dss_batch_dict, max_prompt_len, max_response_len
 
-class TrainingWorker(Worker, DistProfilerExtension):
-    """
-    TrainingWorker provides a Tinker-like API (https://thinkingmachines.ai/tinker/) as a RayWorkerGroup
-    to a single controller. Currently, we only provide more coarse grained APIs,
-    and do not provide exact APIs as Tinker does. But this can be added in the future.
-    """
 
-    def __init__(self, config: TrainingWorkerConfig, actor_config: ActorConfig, arctic_rl_client, tokenizer):
+class ActorRolloutRefWorker(Worker, DistProfilerExtension):
+    def __init__(self, config: DictConfig, role: str, **kwargs):
         Worker.__init__(self)
-
-        from verl.workers.engine import BaseEngine, EngineRegistry
-
-        #initialize_global_process_group_ray(timeout_second=None)
-
         self.config = config
-        self.actor_config = actor_config
+        self.role = role
+        self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
+        self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
+        self._is_ref = self.role in ["ref", "actor_rollout_ref"]
 
-        self.arctic_rl_client = arctic_rl_client
-        self.tokenizer = tokenizer
-        self.pad_token_id = self.tokenizer.pad_token_id
+        self.arctic_rl_client = kwargs.get("arctic_rl_client", None)
+        assert self.arctic_rl_client is not None, "arctic_rl_client is required"
 
-        self.model_config = self.config.model_config
-        self.engine_config = self.config.engine_config
-        self.optimizer_config = self.config.optimizer_config
-        self.checkpoint_config = self.config.checkpoint_config
-        self.device_name = get_device_name()
         self.use_zorro = ray.get(self.arctic_rl_client.is_zorro_enabled.remote())
 
-        print(f"{self.engine_config=}")
+        DistProfilerExtension.__init__(self, DistProfiler(rank=self.rank, config=None, tool_config=None))
 
-        if self.engine_config is None:
-            assert self.optimizer_config is None
-            if self.config.auto_select_engine_optim_fn is None:
-                raise ValueError(
-                    "engine_config is not provided and auto_select_engine_optim_fn is not set. "
-                    "Cannot determine engine backend."
-                )
-            # Support automatically select engine backend given model config
-            self.engine_config, self.optimizer_config = self.config.auto_select_engine_optim_fn(
-                self.model_config, self.device_name
+        if self._is_actor:
+            model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model)
+            actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
+            actor_config.model_config = model_config
+            actor_training_config = TrainingWorkerConfig(
+                model_type="language_model",
+                model_config=actor_config.model_config,
+                engine_config=actor_config.engine,
+                optimizer_config=actor_config.optim,
+                checkpoint_config=actor_config.checkpoint,
             )
+            self.actor_config = actor_config
 
-        # we use the one defined in model
-        # TODO: this is not elegant and should refactor later
-        self.engine_config.use_remove_padding = self.model_config.use_remove_padding
-        self.engine_config.use_fused_kernels = self.model_config.use_fused_kernels
+            assert self.config.actor.use_dynamic_bsz == self.config.rollout.log_prob_use_dynamic_bsz
 
-        if repatch is not None:
-            # NPU MindSpeed patch, will be refactored with MindSpeedEngine.
-            repatch(self.engine_config.get("override_transformer_config", {}))
+            # assign engine configs
+            actor_training_config.engine_config.use_dynamic_bsz = self.config.actor.use_dynamic_bsz
+            actor_training_config.engine_config.infer_max_token_len_per_gpu = (
+                self.config.rollout.log_prob_max_token_len_per_gpu
+            )
+            actor_training_config.engine_config.infer_micro_batch_size_per_gpu = (
+                self.config.rollout.log_prob_micro_batch_size_per_gpu
+            )
+            actor_training_config.engine_config.max_token_len_per_gpu = self.config.actor.ppo_max_token_len_per_gpu
+            actor_training_config.engine_config.micro_batch_size_per_gpu = (
+                self.config.actor.ppo_micro_batch_size_per_gpu
+            )
+            actor_training_config.engine_config.use_remove_padding = model_config.use_remove_padding
 
-        # TODO: add DistProfilerExtension
-        self.profiler_config = self.config.profiler_config
-        if self.profiler_config is not None:
-            self.profiler_tool_config = self.profiler_config.tool_config.get(self.profiler_config.tool, {})
-        else:
-            self.profiler_tool_config = None
+            if self.config.actor.use_dynamic_bsz:
+                assert self.config.rollout.log_prob_max_token_len_per_gpu is not None
+                assert self.config.actor.ppo_max_token_len_per_gpu is not None
+            else:
+                assert self.config.rollout.log_prob_micro_batch_size_per_gpu is not None
+                assert self.config.actor.ppo_micro_batch_size_per_gpu is not None
 
-        DistProfilerExtension.__init__(
-            self, DistProfiler(rank=self.rank, config=self.profiler_config, tool_config=self.profiler_tool_config)
-        )
+            trust_remote_code=self.config.model.get("trust_remote_code", False)
+            self.tokenizer = hf_tokenizer(self.config.model.path, trust_remote_code=trust_remote_code)
+            if self.tokenizer.pad_token_id is None:
+                self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
+            self.pad_token_id = self.tokenizer.pad_token_id
 
-        # self.engine: BaseEngine = EngineRegistry.new(
-        #     model_type=self.config.model_type,
-        #     backend=self.engine_config.strategy,
-        #     model_config=self.model_config,
-        #     engine_config=self.engine_config,
-        #     optimizer_config=self.optimizer_config,
-        #     checkpoint_config=self.checkpoint_config,
-        # )
+            self.device_name = get_device_name()
+            self.flops_counter = FlopsCounter(model_config.hf_config)
 
-        # # build dispatch info
-        # self._register_dispatch_collect_info(
-        #     mesh_name="train",
-        #     dp_rank=self.engine.get_data_parallel_rank(),
-        #     is_collect=self.engine.is_mp_src_rank_with_outputs(),
-        # )
 
-        self.flops_counter = FlopsCounter(self.model_config.hf_config)
 
-        self.loss_fn = None
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def init_model(self):
+        self._register_dispatch_collect_info("actor", dp_rank=self.rank, is_collect=True)
+        self._register_dispatch_collect_info("ref", dp_rank=self.rank, is_collect=True)
+        self._register_dispatch_collect_info("rollout", dp_rank=self.rank, is_collect=True)
+
+        return
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def destroy(self):
+        self.dss_training_engine.destroy()
+        self.arctic_inference_engine.destroy()
+        return
+
+    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
+    def set_loss_fn(self, loss_fn):
+        return
 
     @register(dispatch_mode=Dispatch.ONE_TO_ALL)
     def to(self, device, model=True, optimizer=True, grad=True):
         """Manual control of load/offload"""
-        assert device in ["cpu", "device"]
+        return
 
-        if device == "device":
-            device = get_device_name()
 
-        self.engine.to(device=device, model=model, optimizer=optimizer, grad=grad)
+    def _update_config_params(self, data: TensorDict):
+        default_keys = dict(
+            use_remove_padding=self.config.model.use_remove_padding,
+            use_dynamic_bsz=self.config.actor.use_dynamic_bsz,
+            max_token_len_per_gpu=self.config.actor.ppo_max_token_len_per_gpu,
+            micro_batch_size_per_gpu=self.config.actor.ppo_micro_batch_size_per_gpu,
+            use_fused_kernels=self.config.actor.use_fused_kernels,
+        )
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def set_loss_fn(self, loss_fn):
-        self.loss_fn = loss_fn
+        for key, val in default_keys.items():
+            if key not in data.keys():
+                tu.assign_non_tensor(data, **{key: val})
 
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def reset(self):
-        """
-        Reset the model engine to the initial state. If the engine is not initialized,
-        we initialize it. Otherwise, reload ckpt and reset states
-        """
-        pass # self.engine.initialize()
+
+    def compute_any_log_prob(self, data: TensorDict, compute_log_prob_fn) -> TensorDict:
+        # print(f"compute_ref_log_prob data: {data}")
+        batch, max_prompt_len, max_response_len = prepare_padded_dss_batch_dict(data, self.pad_token_id)
+
+        self._update_config_params(data)
+
+        #max_token_len_per_gpu = self.actor_config.ppo_max_token_len_per_gpu
+
+        meta = dict(
+            rollout_n=self.config.rollout.n,
+            max_prompt_len=max_prompt_len,
+            max_response_len=max_response_len,
+            max_token_len_per_gpu=data["max_token_len_per_gpu"],
+            temperature=data["temperature"],
+        )
+
+        payload = dict(batch=batch, meta=meta)
+
+        response = ray.get(compute_log_prob_fn.remote(payload))
+
+        # print(f"compute_any_log_prob: {response['batch']['entropy'].shape=} {response['batch']['log_probs'].shape=}")
+
+        #batch_output = postprocess_log_prob_output(data=data, entropy=entropy, log_probs=log_probs)
+        #model_output = batch_output.pop("model_output", {})
+
+        # verl wants a full [bs, max_prompt_len+max_response_len] tensors and jagged
+        entropy = prepand_max_prompt_len_zeros(response['batch']['entropy'], max_prompt_len)
+        log_probs = prepand_max_prompt_len_zeros(response['batch']['log_probs'], max_prompt_len)
+        # print(f"compute_any_log_prob: {entropy.shape=} {log_probs.shape=}")
+        entropy = make_njt(data, entropy)
+        log_probs = make_njt(data, log_probs)
+        # print(f"compute_any_log_prob: {entropy.shape=} {log_probs.shape=}")
+
+        model_output = dict(entropy=entropy, log_probs=log_probs)
+        metrics = response['metrics']
+        # TODO: fix me - mfu is not computed here
+        metrics["mfu"] = 0.0
+
+        final_output = tu.get_tensordict(tensor_dict=model_output, non_tensor_dict={"metrics": metrics})
+
+        return final_output
+
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
+    @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
+    def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
+        return self.compute_any_log_prob(data, self.arctic_rl_client.compute_ref_log_prob)
+
+
+    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
+    @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
+    def compute_log_prob(self, data: TensorDict) -> TensorDict:
+        return self.compute_any_log_prob(data, self.arctic_rl_client.compute_log_prob)
+
 
     def _postprocess_output(self, output, *, global_token_num, delta_time, forward_only, images_seqlens):
         """
@@ -436,7 +471,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="train"), blocking=False)
-    def train_global_batch(self, data: TensorDict) -> TensorDict:
+    def train_actor_global_batch(self, data: TensorDict) -> TensorDict:
         """Train a global batch
 
         Args:
@@ -445,11 +480,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
         Returns:
 
         """
-        assert self.loss_fn is not None, "loss function can't be None when calling train_global_batch"
-
         disable_auto_offload = tu.pop(data, key="disable_auto_offload", default=False)
-
-        self.engine_config = self.config.engine_config
 
         # update
         global_token_num = data["input_ids"].offsets().diff().tolist()  # (total_nnz,)
@@ -467,11 +498,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
         # inject engineering parameters if not specified
         default_keys = dict(
-            use_remove_padding=self.model_config.use_remove_padding,
-            use_dynamic_bsz=self.engine_config.use_dynamic_bsz,
-            max_token_len_per_gpu=self.engine_config.max_token_len_per_gpu,
-            micro_batch_size_per_gpu=self.engine_config.micro_batch_size_per_gpu,
-            use_fused_kernels=self.engine_config.use_fused_kernels,
+            use_remove_padding=self.config.model.use_remove_padding,
+            use_dynamic_bsz=self.config.actor.use_dynamic_bsz,
+            max_token_len_per_gpu=self.config.actor.ppo_max_token_len_per_gpu,
+            micro_batch_size_per_gpu=self.config.actor.ppo_micro_batch_size_per_gpu,
+            use_fused_kernels=self.config.actor.use_fused_kernels,
         )
 
         for key, val in default_keys.items():
@@ -531,14 +562,14 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 old_log_probs=data["old_log_probs"],
                 advantages=data["advantages"],
             )
-            if self.actor_config.use_kl_loss:
+            if self.config.actor.use_kl_loss:
                 batch["ref_log_prob"] = data["ref_log_prob"]
 
             # print(f"{batch=}")
 
             # TODO: move to init since globally constant
             meta = dict(
-                rollout_n=self.actor_config.rollout_n,
+                rollout_n=self.config.rollout.n,
                 max_prompt_len=max_prompt_len,
                 max_response_len=max_response_len,
                 max_token_len_per_gpu=data["max_token_len_per_gpu"],
@@ -551,7 +582,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
 
             # we need to serialize the config object to dict
             # dataclasses.asdict only returns keys that are defined at init (vars will do more) - but perhaps we want `asdict`?
-            actor_config_as_dict = vars(self.actor_config)
+            actor_config_as_dict = vars(self.config.actor)
             # print(f"update_actor: {self.actor_config=}")
             # print(f"update_actor: {actor_config_as_dict=}")
             import json
@@ -559,7 +590,7 @@ class TrainingWorker(Worker, DistProfilerExtension):
                 return json.loads(json.dumps(obj, default=lambda o: None))
             actor_config_as_dict = safe_serialize(actor_config_as_dict)
 
-            policy_loss_config = safe_serialize(vars(self.actor_config.policy_loss))
+            policy_loss_config = safe_serialize(vars(self.config.actor.policy_loss))
 
             meta.update(dict(actor_config=actor_config_as_dict, policy_loss_config=policy_loss_config))
             # print(f"update_actor: {post_process_inputs=}")
@@ -648,169 +679,11 @@ class TrainingWorker(Worker, DistProfilerExtension):
         return output
 
 
-
-class ActorRolloutRefWorker(Worker, DistProfilerExtension):
-    def __init__(self, config: DictConfig, role: str, **kwargs):
-        Worker.__init__(self)
-        self.config = config
-        self.role = role
-        self._is_actor = self.role in ["actor", "actor_rollout", "actor_rollout_ref"]
-        self._is_rollout = self.role in ["rollout", "actor_rollout", "actor_rollout_ref"]
-        self._is_ref = self.role in ["ref", "actor_rollout_ref"]
-
-        self.arctic_rl_client = kwargs.get("arctic_rl_client", None)
-
-        # assert self.arctic_rl_client is not None, "arctic_rl_client is required"
-        self._loaded_dump_data = load_dump_data(1, 1)
-        DistProfilerExtension.__init__(self, DistProfiler(rank=self.rank, config=None, tool_config=None))
-
-        if self._is_actor:
-            model_config: HFModelConfig = omega_conf_to_dataclass(self.config.model)
-            actor_config: ActorConfig = omega_conf_to_dataclass(self.config.actor)
-            actor_config.model_config = model_config
-            actor_training_config = TrainingWorkerConfig(
-                model_type="language_model",
-                model_config=actor_config.model_config,
-                engine_config=actor_config.engine,
-                optimizer_config=actor_config.optim,
-                checkpoint_config=actor_config.checkpoint,
-            )
-            self.actor_config = actor_config
-
-            assert self.config.actor.use_dynamic_bsz == self.config.rollout.log_prob_use_dynamic_bsz
-
-            # assign engine configs
-            actor_training_config.engine_config.use_dynamic_bsz = self.config.actor.use_dynamic_bsz
-            actor_training_config.engine_config.infer_max_token_len_per_gpu = (
-                self.config.rollout.log_prob_max_token_len_per_gpu
-            )
-            actor_training_config.engine_config.infer_micro_batch_size_per_gpu = (
-                self.config.rollout.log_prob_micro_batch_size_per_gpu
-            )
-            actor_training_config.engine_config.max_token_len_per_gpu = self.config.actor.ppo_max_token_len_per_gpu
-            actor_training_config.engine_config.micro_batch_size_per_gpu = (
-                self.config.actor.ppo_micro_batch_size_per_gpu
-            )
-            actor_training_config.engine_config.use_remove_padding = model_config.use_remove_padding
-
-            if self.config.actor.use_dynamic_bsz:
-                assert self.config.rollout.log_prob_max_token_len_per_gpu is not None
-                assert self.config.actor.ppo_max_token_len_per_gpu is not None
-            else:
-                assert self.config.rollout.log_prob_micro_batch_size_per_gpu is not None
-                assert self.config.actor.ppo_micro_batch_size_per_gpu is not None
-
-            trust_remote_code=self.config.model.get("trust_remote_code", False)
-            self.tokenizer = hf_tokenizer(self.config.model.path, trust_remote_code=trust_remote_code)
-            if self.tokenizer.pad_token_id is None:
-                self.tokenizer.pad_token_id = self.tokenizer.eos_token_id
-            self.pad_token_id = self.tokenizer.pad_token_id
-            self.actor = TrainingWorker(config=actor_training_config, actor_config=actor_config, arctic_rl_client=self.arctic_rl_client, tokenizer=self.tokenizer )
-
-            self.actor.reset()
-            self.loss_fn = partial(ppo_loss, config=actor_config)
-            self.actor.set_loss_fn(loss_fn=self.loss_fn)
-
-            self.set_dispatch_collect(mesh_name="actor", **self.actor.get_dispatch_collect())
-
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def init_model(self):
-        self._register_dispatch_collect_info("actor", dp_rank=self.rank, is_collect=True)
-        self._register_dispatch_collect_info("ref", dp_rank=self.rank, is_collect=True)
-        self._register_dispatch_collect_info("rollout", dp_rank=self.rank, is_collect=True)
-
-        return
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def destroy(self):
-        self.dss_training_engine.destroy()
-        self.arctic_inference_engine.destroy()
-        return
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def set_loss_fn(self, loss_fn):
-        return
-
-    @register(dispatch_mode=Dispatch.ONE_TO_ALL)
-    def to(self, device, model=True, optimizer=True, grad=True):
-        """Manual control of load/offload"""
-        return
-
-
-    def _update_config_params(self, data: TensorDict):
-        default_keys = dict(
-            use_remove_padding=self.actor.model_config.use_remove_padding,
-            use_dynamic_bsz=self.actor.engine_config.use_dynamic_bsz,
-            max_token_len_per_gpu=self.actor.engine_config.max_token_len_per_gpu,
-            micro_batch_size_per_gpu=self.actor.engine_config.micro_batch_size_per_gpu,
-            use_fused_kernels=self.actor.engine_config.use_fused_kernels,
-        )
-
-        for key, val in default_keys.items():
-            if key not in data.keys():
-                tu.assign_non_tensor(data, **{key: val})
-
-
-    def compute_any_log_prob(self, data: TensorDict, compute_log_prob_fn) -> TensorDict:
-        # print(f"compute_ref_log_prob data: {data}")
-        batch, max_prompt_len, max_response_len = prepare_padded_dss_batch_dict(data, self.pad_token_id)
-
-        self._update_config_params(data)
-
-        #max_token_len_per_gpu = self.actor_config.ppo_max_token_len_per_gpu
-
-        meta = dict(
-            rollout_n=self.actor_config.rollout_n,
-            max_prompt_len=max_prompt_len,
-            max_response_len=max_response_len,
-            max_token_len_per_gpu=data["max_token_len_per_gpu"],
-            temperature=data["temperature"],
-        )
-
-        payload = dict(batch=batch, meta=meta)
-
-        response = ray.get(compute_log_prob_fn.remote(payload))
-
-        # print(f"compute_any_log_prob: {response['batch']['entropy'].shape=} {response['batch']['log_probs'].shape=}")
-
-        #batch_output = postprocess_log_prob_output(data=data, entropy=entropy, log_probs=log_probs)
-        #model_output = batch_output.pop("model_output", {})
-
-        # verl wants a full [bs, max_prompt_len+max_response_len] tensors and jagged
-        entropy = prepand_max_prompt_len_zeros(response['batch']['entropy'], max_prompt_len)
-        log_probs = prepand_max_prompt_len_zeros(response['batch']['log_probs'], max_prompt_len)
-        # print(f"compute_any_log_prob: {entropy.shape=} {log_probs.shape=}")
-        entropy = make_njt(data, entropy)
-        log_probs = make_njt(data, log_probs)
-        # print(f"compute_any_log_prob: {entropy.shape=} {log_probs.shape=}")
-
-        model_output = dict(entropy=entropy, log_probs=log_probs)
-        metrics = response['metrics']
-        # TODO: fix me - mfu is not computed here
-        metrics["mfu"] = 0.0
-
-        final_output = tu.get_tensordict(tensor_dict=model_output, non_tensor_dict={"metrics": metrics})
-
-        return final_output
-
-
-    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="ref"))
-    @DistProfiler.annotate(color="olive", role="ref_compute_log_prob")
-    def compute_ref_log_prob(self, data: TensorDict) -> TensorDict:
-        return self.compute_any_log_prob(data, self.arctic_rl_client.compute_ref_log_prob)
-
-
-    @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
-    @DistProfiler.annotate(color="blue", role="actor_compute_log_prob")
-    def compute_log_prob(self, data: TensorDict) -> TensorDict:
-        return self.compute_any_log_prob(data, self.arctic_rl_client.compute_log_prob)
-
-
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="red", role="actor_update")
     def update_actor(self, data: TensorDict) -> TensorDict:
-        output = self.actor.train_global_batch(data=data)
+        # output = self.actor.train_global_batch(data=data)
+        output = self.train_actor_global_batch(data=data)
         return output.cpu() if output is not None else None
 
     # TODO: Load Checkpoint API
