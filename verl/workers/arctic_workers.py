@@ -1,14 +1,10 @@
 from pathlib import Path
 import torch
-from verl.utils.ray_utils import auto_await
 from verl.single_controller.base.decorator import Dispatch, make_nd_compute_dataproto_dispatch_fn, register
-from verl.protocol import DataProto
 from verl.single_controller.base import Worker
 from verl.utils.profiler import DistProfiler, DistProfilerExtension
-from verl.workers.engine_workers import ActorRolloutRefWorker as EngineActorRolloutRefWorker
 from omegaconf import DictConfig
 from tensordict import TensorDict
-from dss_client.client import DSSInferenceClient, DSSTrainingClient
 from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer
 from deepspeed.utils import OnDevice
 from verl.utils import tensordict_utils as tu
@@ -24,8 +20,6 @@ from verl.utils.device import (
     set_expandable_segments,
 )
 from codetiming import Timer
-import functools
-import logging
 import os
 from contextlib import nullcontext
 from functools import partial
