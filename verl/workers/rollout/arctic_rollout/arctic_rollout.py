@@ -291,7 +291,7 @@ class ArcticReplica(RolloutReplica):
         super().__init__(replica_rank, config, model_config, gpus_per_node, is_reward_model)
         self.server_class = ray.remote(ArcticLLMServer)
         self.arctic_rl_client = kwargs.get("arctic_rl_client", None)
-        # assert self.arctic_rl_client is not None, "arctic_rl_client is required"
+        assert self.arctic_rl_client is not None, "arctic_rl_client is required"
 
 
     def rollout_worker_use_gpu(self) -> bool:
