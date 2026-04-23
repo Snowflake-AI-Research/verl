@@ -99,10 +99,6 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
     prompt_ids = data["prompts"]
     response_ids = data["responses"]
     attention_mask = data["attention_mask"]
-    # print(f"{prompt_ids.shape=}")
-    # print(f"{response_ids.shape=}")
-    # print(f"{attention_mask.shape=}")
-    # print(f"{attention_mask=}")
 
     max_response_len = tu.get_non_tensor_data(data=data, key="max_response_len", default=-1)
 
@@ -120,14 +116,6 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
 
     sequence_lens = prompt_lens + response_lens
     sequence_offsets = sequence_lens.cumsum(dim=0)
-    # print(f"{data=}")
-    # print(f"{prompt_lens=}")
-    # print(f"{response_lens=}")
-    # print(f"{response_lens=}")
-    # print(f"{max_response_len=}")
-    # print(f"{sequence_offsets=}")
-    # print(f"{values=}")
-    # print(f"{values.shape=}")
     assert sequence_offsets[-1].item() == values.shape[0], f"{sequence_offsets[-1].item()} != {values.shape[0]}"
 
     response_list = []
