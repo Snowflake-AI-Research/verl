@@ -102,7 +102,6 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
 
     max_response_len = tu.get_non_tensor_data(data=data, key="max_response_len", default=-1)
 
-    # print(f"{prompt_ids.is_nested=}")
     if prompt_ids.is_nested:
         prompt_lens = prompt_ids.offsets().diff()
         response_lens = response_ids.offsets().diff()
@@ -116,7 +115,7 @@ def no_padding_2_padding(tensor: torch.Tensor, data: TensorDict) -> torch.Tensor
 
     sequence_lens = prompt_lens + response_lens
     sequence_offsets = sequence_lens.cumsum(dim=0)
-    assert sequence_offsets[-1].item() == values.shape[0], f"{sequence_offsets[-1].item()} != {values.shape[0]}"
+    assert sequence_offsets[-1].item() == values.shape[0]
 
     response_list = []
     for resp_len, seq_offset in zip(response_lens, sequence_offsets, strict=True):
