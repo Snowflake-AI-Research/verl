@@ -199,10 +199,10 @@ class ArcticRLClientWrapper:
         return response
 
     def update_weights(self):
-        return None # TODO: Implement this
-        # response = self._client.sync_weights()
-        # print(f"[ArcticRLClientWrapper] update_weights OUTPUT: {response.keys()=}")
-        # return response
+        # return None # TODO: Implement this
+        response = self._client.sync_weights()
+        print(f"[ArcticRLClientWrapper] update_weights OUTPUT: {response.keys()=}")
+        return response
 
     def destroy(self):
         if self._client is not None:
