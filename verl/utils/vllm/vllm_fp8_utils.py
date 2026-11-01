@@ -22,10 +22,19 @@ import vllm
 from packaging import version
 
 try:
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
     from vllm.model_executor.layers.linear import LinearBase
 except ImportError as e:
     raise ImportError("FP8 quantization not available") from e
+
+try:
+    # vLLM <= 0.30. Expert weights (w13_weight, w2_weight) live on this class.
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+except ImportError:
+    try:
+        # vLLM >= 0.31 removed the FusedMoE layer. Those weights live on RoutedExperts.
+        from vllm.model_executor.layers.fused_moe import RoutedExperts as FusedMoE
+    except ImportError as e:
+        raise ImportError("FP8 quantization not available") from e
 
 from verl.utils.kernel.fp8_kernel import scaled_fp8_blockwise
 
@@ -43,6 +52,20 @@ class FP8State:
 
 
 fp8_state: FP8State = FP8State()
+
+
+def _fused_moe_module(module):
+    """Return the module that owns the expert weights, or None.
+
+    On vLLM <= 0.30 that module is ``FusedMoE`` itself. On vLLM >= 0.31 it is
+    ``RoutedExperts``, which may be the module or its ``routed_experts`` child.
+    """
+    if isinstance(module, FusedMoE):
+        return module
+    routed = getattr(module, "routed_experts", None)
+    if isinstance(routed, FusedMoE):
+        return routed
+    return None
 
 
 def is_fp8_model(vllm_config):
@@ -71,7 +94,10 @@ def get_module_from_param_name(model, name: str):
 
     current_module = model
     try:
-        # Traverse the model hierarchy
+        # Traverse the model hierarchy. Stop on a FusedMoE only when the path
+        # still has parts under it: those are weight names, not submodules.
+        # A vLLM >= 0.31 MoERunner is not itself the weight owner, so keep
+        # walking (shared experts live beside routed_experts).
         for part in module_path:
             if isinstance(current_module, FusedMoE):
                 return current_module
@@ -81,7 +107,8 @@ def get_module_from_param_name(model, name: str):
                 current_module = getattr(current_module, part)
     except (AttributeError, IndexError, ValueError) as e:
         print(f"Warning: Could not find module for parameter '{name}'. Error: {e}")
-    return current_module
+        return current_module
+    return _fused_moe_module(current_module) or current_module
 
 
 def is_fp8_weight(name, model):
@@ -92,10 +119,11 @@ def is_fp8_weight(name, model):
             module = get_module_from_param_name(model, name)
             # We currently only quantize linear layers
 
+            experts = _fused_moe_module(module)
             if (isinstance(module, LinearBase) and module.weight.dtype == torch.float8_e4m3fn) or (
-                isinstance(module, FusedMoE)
-                and module.w13_weight.dtype == torch.float8_e4m3fn
-                and module.w2_weight.dtype == torch.float8_e4m3fn
+                experts is not None
+                and experts.w13_weight.dtype == torch.float8_e4m3fn
+                and experts.w2_weight.dtype == torch.float8_e4m3fn
             ):
                 fp8_state.fp8_param_names.add(name)
     return name in fp8_state.fp8_param_names
